@@ -10,7 +10,8 @@ import type { Message } from '../lib/types';
 import { MessageList } from '../ui/MessageList';
 import { Composer } from '../ui/Composer';
 import { ActivityBar } from '../ui/ActivityBar';
-import { Logo, MoreIcon } from '../ui/icons';
+import { MoreIcon } from '../ui/icons';
+import { Reticle } from '../ui/Reticle';
 import { ago } from '../ui/time';
 
 const SUGGESTIONS = [
@@ -19,14 +20,41 @@ const SUGGESTIONS = [
   'Check disk space and tell me what is taking the most room',
 ];
 
+const uptime = (ms: number) => {
+  const s = Math.floor(ms / 1000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(Math.floor(s / 3600))}:${p(Math.floor((s % 3600) / 60))}:${p(s % 60)}`;
+};
+
+/** Round-trip time to the backend, sampled every 10 seconds. */
+function useLatency() {
+  const [ms, setMs] = useState<number | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const ping = async () => {
+      const t = performance.now();
+      const { error } = await phoneClient.from('agent_state').select('id').eq('id', 1).maybeSingle();
+      if (alive) setMs(error ? null : Math.round(performance.now() - t));
+    };
+    ping();
+    const id = window.setInterval(ping, 10_000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, []);
+  return ms;
+}
+
 const isHiddenCommand = (m: Message) => m.sender === 'user' && m.body.trim() === '/stop';
 
 export function ChatScreen({ session }: { session: Session }) {
-  const now = useNow();
+  const now = useNow(1000);
   const [menu, setMenu] = useState(false);
   const [update, setUpdate] = useState<PhoneUpdate | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const startedAt = useRef(Date.now());
+  const latency = useLatency();
 
   const { messages, agent, live, upsert } = useConversation(phoneClient, (m) => {
     if (m.sender === 'user') return;
@@ -47,7 +75,8 @@ export function ChatScreen({ session }: { session: Session }) {
 
   const visible = useMemo(() => messages.filter((m) => !isHiddenCommand(m)), [messages]);
   const online = !!agent?.last_seen && now - Date.parse(agent.last_seen) < ONLINE_WINDOW_MS && agent.online;
-  const working = messages.some((m) => m.sender === 'user' && m.status === 'processing');
+  const current = messages.find((m) => m.sender === 'user' && m.status === 'processing');
+  const working = !!current;
   const queued = messages.filter((m) => m.sender === 'user' && m.status === 'queued').length;
 
   const send = async (body: string) => {
@@ -69,23 +98,23 @@ export function ChatScreen({ session }: { session: Session }) {
   };
 
   const statusLine = working
-    ? 'working…'
+    ? 'executing directive'
     : online
-      ? queued
-        ? `online · ${queued} queued`
-        : 'online'
+      ? 'link secure · online'
       : `offline · seen ${ago(agent?.last_seen ?? null, now)}`;
 
   return (
     <div className="phone">
       <header className="chat-head">
         <div className="avatar">
-          <Logo size={40} />
-          <span className={`presence ${online ? 'on' : ''}`} />
+          <Reticle size={46} detail="mini" state={working ? 'busy' : online ? 'idle' : 'offline'} />
         </div>
         <div className="who">
-          <div className="name">Claude</div>
-          <div className={`sub ${working ? 'accent' : ''}`}>
+          <div className="name">
+            CLAUDE<small>// OPERATOR NODE</small>
+          </div>
+          <div className={`sub ${working ? 'accent' : online ? 'on' : ''}`}>
+            <span className={`led ${working ? 'busy' : online ? 'on' : ''}`} />
             {statusLine}
             {!live && <span className="reconnecting"> · reconnecting</span>}
           </div>
@@ -119,6 +148,25 @@ export function ChatScreen({ session }: { session: Session }) {
         )}
       </header>
 
+      <div className="hud">
+        <div>
+          <span>NODE</span>
+          <b className={online ? '' : 'dim'}>{agent?.machine ?? '—'}</b>
+        </div>
+        <div>
+          <span>LATENCY</span>
+          <b className={latency == null ? 'dim' : ''}>{latency == null ? '—' : `${latency}ms`}</b>
+        </div>
+        <div>
+          <span>QUEUE</span>
+          <b className={queued ? '' : 'dim'}>{String(queued).padStart(2, '0')}</b>
+        </div>
+        <div>
+          <span>UPLINK</span>
+          <b>{uptime(now - startedAt.current)}</b>
+        </div>
+      </div>
+
       {update && (
         <button className="update-banner" onClick={() => openExternal(update.url)}>
           <span>Relay {update.version} is available</span>
@@ -132,9 +180,9 @@ export function ChatScreen({ session }: { session: Session }) {
         onCancel={cancel}
         empty={
           <div className="empty">
-            <Logo size={56} />
-            <h2>What should I work on?</h2>
-            <p>Send a task. I'll run it on your PC and message you when it's done.</p>
+            <Reticle size={190} detail="lite" state={online ? 'idle' : 'offline'} />
+            <h2 className="caret">AWAITING DIRECTIVE</h2>
+            <p>Send a task. It runs on your PC and reports back here when complete.</p>
             <div className="chips">
               {SUGGESTIONS.map((s) => (
                 <button key={s} onClick={() => send(s).catch(() => {})}>{s}</button>
@@ -144,8 +192,8 @@ export function ChatScreen({ session }: { session: Session }) {
         }
       />
 
-      <ActivityBar agent={agent} working={working} onStop={() => send('/stop').catch(() => {})} />
-      <Composer placeholder={online ? 'Message Claude' : 'Message Claude (runs when your PC is back)'} onSend={send} enterSends={false} />
+      <ActivityBar agent={agent} working={working} since={current?.updated_at} onStop={() => send('/stop').catch(() => {})} />
+      <Composer placeholder={online ? 'Enter directive…' : 'Enter directive (queued until node is back)'} onSend={send} enterSends={false} />
       {toast && <div className="toast">{toast}</div>}
     </div>
   );

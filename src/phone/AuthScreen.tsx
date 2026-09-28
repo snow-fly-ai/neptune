@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { phoneClient } from './client';
-import { Logo, MailIcon } from '../ui/icons';
+import { MailIcon } from '../ui/icons';
+import { Reticle } from '../ui/Reticle';
 
 export function AuthScreen() {
   const [step, setStep] = useState<'email' | 'code'>('email');
@@ -38,11 +39,13 @@ export function AuthScreen() {
 
   return (
     <div className="auth">
-      <div className="auth-glow" />
       <div className="auth-card">
-        <Logo size={64} />
-        <h1>Relay</h1>
-        <p className="lede">Message Claude on your PC from anywhere. It works while you're away and pings you when it's done.</p>
+        <Reticle size={170} detail="lite" state={busy ? 'busy' : 'idle'} />
+        <h1>RELAY</h1>
+        <p className="lede">Secure uplink to Claude on your PC. It works while you're away and reports back when done.</p>
+        <div className="auth-steps">
+          <span className="on">01 IDENTIFY</span>—<span className={step === 'code' ? 'on' : ''}>02 VERIFY</span>—<span>03 LINK</span>
+        </div>
 
         {step === 'email' ? (
           <form
@@ -64,7 +67,7 @@ export function AuthScreen() {
               />
             </label>
             <button className="primary" disabled={busy || !/\S+@\S+\.\S+/.test(email)}>
-              {busy ? 'Sending…' : 'Get a sign-in code'}
+              {busy ? 'Requesting…' : 'Request access code'}
             </button>
           </form>
         ) : (
@@ -88,7 +91,7 @@ export function AuthScreen() {
               autoFocus
             />
             <button className="primary" disabled={busy || code.length < 6}>
-              {busy ? 'Verifying…' : 'Sign in'}
+              {busy ? 'Verifying…' : 'Authenticate'}
             </button>
             <button type="button" className="ghost" onClick={() => { setStep('email'); setCode(''); setError(null); }}>
               Use a different email

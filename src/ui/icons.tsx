@@ -34,19 +34,18 @@ export const XIcon = (p: P) => (
   <svg {...base} {...p}><path d="M6 6l12 12M18 6L6 18" /></svg>
 );
 
-/** Brand mark: speech bubble with a spark, on the accent gradient. */
+/** Brand mark: a green core inside broken blue rings (a still of the Reticle). */
 export function Logo({ size = 36 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 1024 1024" aria-hidden>
-      <defs>
-        <linearGradient id="relay-logo" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#FF6A4D" />
-          <stop offset="1" stopColor="#FFB054" />
-        </linearGradient>
-      </defs>
-      <rect width="1024" height="1024" rx="260" fill="url(#relay-logo)" />
-      <path d="M332 286h360c50 0 90 40 90 90v214c0 50-40 90-90 90H486l-118 92c-14 11-34 1-34-17v-75h-2c-50 0-90-40-90-90V376c0-50 40-90 90-90z" fill="none" stroke="#fff" strokeWidth="60" strokeLinejoin="round" />
-      <path d="M512 366c10 58 34 82 92 92-58 10-82 34-92 92-10-58-34-82-92-92 58-10 82-34 92-92z" fill="#fff" />
+      <rect width="1024" height="1024" rx="200" fill="#04070B" />
+      <path d="M512 172a340 340 0 0 1 340 340" fill="none" stroke="#60A5FA" strokeWidth="34" strokeLinecap="round" />
+      <path d="M852 512a340 340 0 0 1-230 322" fill="none" stroke="#60A5FA" strokeWidth="34" strokeLinecap="round" strokeOpacity="0.5" />
+      <path d="M172 512a340 340 0 0 1 190-305" fill="none" stroke="#60A5FA" strokeWidth="34" strokeLinecap="round" />
+      <path d="M512 262a250 250 0 0 1 216 375" fill="none" stroke="#22C55E" strokeWidth="44" strokeLinecap="round" />
+      <path d="M296 640a250 250 0 0 1-30-160" fill="none" stroke="#22C55E" strokeWidth="44" strokeLinecap="round" />
+      <circle cx="512" cy="512" r="176" fill="none" stroke="#22C55E" strokeWidth="18" />
+      <circle cx="512" cy="512" r="130" fill="#22C55E" />
     </svg>
   );
 }

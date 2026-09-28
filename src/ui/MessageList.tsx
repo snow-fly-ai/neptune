@@ -26,9 +26,9 @@ function Status({ m, onCancel }: { m: Message; onCancel?: (m: Message) => void }
         </span>
       );
     case 'processing':
-      return <span className="status working"><span className="pulse" /> Working</span>;
+      return <span className="status working"><span className="pulse" /> Executing</span>;
     case 'done':
-      return <span className="status done"><CheckIcon width={13} height={13} /> Done</span>;
+      return <span className="status done"><CheckIcon width={13} height={13} /> Complete</span>;
     case 'error':
       return <span className="status error"><AlertIcon width={12} height={12} /> Failed</span>;
     case 'cancelled':
@@ -91,6 +91,12 @@ export function MessageList({ messages, self, empty, onCancel }: Props) {
               {newDay && <div className="day">{dayLabel(m.created_at)}</div>}
               <div className={`row ${mine ? 'mine' : 'theirs'} ${grouped ? 'grouped' : ''}`}>
                 <div className={`bubble ${m.sender} ${m.meta?.is_error ? 'is-error' : ''}`}>
+                  {!grouped && (
+                    <div className="bubble-head">
+                      {m.sender === 'claude' ? '◆ Claude · response' : '▲ Directive'}
+                      <i>#{m.id.slice(0, 6)}</i>
+                    </div>
+                  )}
                   {m.sender === 'claude' ? <Markdown text={m.body} /> : <div className="plain">{m.body}</div>}
                 </div>
                 <div className="meta">

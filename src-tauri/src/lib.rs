@@ -1,4 +1,5 @@
 mod bridge;
+mod sys;
 
 #[cfg(desktop)]
 use tauri::Manager;
@@ -77,12 +78,15 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
         .manage(bridge::Runs::default())
+        .manage(sys::Sys::default())
         .invoke_handler(tauri::generate_handler![
             bridge::load_config,
             bridge::save_config,
             bridge::host_info,
             bridge::run_claude,
             bridge::cancel_claude,
+            sys::sys_stats,
+            sys::keep_awake,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Relay");

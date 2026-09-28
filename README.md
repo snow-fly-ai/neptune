@@ -3,7 +3,9 @@
 Message Claude on your PC from your phone. Claude works on the task and pings you when it's done.
 
 - **Phone (Android):** chat client. Sign in with your email (6-digit code), send tasks, watch live progress, get a notification when a reply lands.
-- **Desktop (Windows):** the bridge. It lives in the tray, picks up queued messages, runs them through the Claude Code CLI headlessly (`claude -p --output-format stream-json`), streams "what I'm doing now" to the phone, and posts the final answer back.
+- **Desktop (Windows):** the bridge, shown as a full-screen ops console: live CPU, memory and network telemetry (from the native `sys_stats` command), an event log, a packet stream, and a central animated reticle that speeds up while Claude works. It keeps the display awake (`keep_awake`). Sending a note to the phone and the bridge settings are in the Transmit and Config dialogs. F11 toggles full screen.
+- **Theme:** green (#22C55E) marks live machine output and the agent. Blue (#2563EB) marks structure and anything you send.
+- **Desktop bridge internals:** It lives in the tray, picks up queued messages, runs them through the Claude Code CLI headlessly (`claude -p --output-format stream-json`), streams "what I'm doing now" to the phone, and posts the final answer back.
 - **Backend:** Supabase (Postgres, realtime and auth). Row-level security only lets the allow-listed owner email read or send messages.
 
 Both apps are the same Tauri 2 + React codebase. The platform decides the mode (`android` → phone, desktop → bridge).
