@@ -18,11 +18,11 @@ fn setup_desktop(app: &mut tauri::App) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-    let show = MenuItem::with_id(app, "show", "Open Relay", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "Open Nebula", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit bridge", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
-    let mut tray = TrayIconBuilder::with_id("relay")
-        .tooltip("Relay bridge")
+    let mut tray = TrayIconBuilder::with_id("nebula")
+        .tooltip("Nebula bridge")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -85,9 +85,11 @@ pub fn run() {
             bridge::host_info,
             bridge::run_agent,
             bridge::cancel_agent,
+            bridge::codex_rate_limits,
+            bridge::remove_legacy_install,
             sys::sys_stats,
             sys::keep_awake,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Relay");
+        .expect("error while running Nebula");
 }

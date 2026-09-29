@@ -6,6 +6,6 @@ export const phoneClient = createClient(SUPABASE_URL, SUPABASE_KEY, {
     persistSession: true,
     autoRefreshToken: true,
     detectSessionInUrl: false,
-    storageKey: 'relay-auth',
+    storageKey: 'nebula-auth',
   },
 });

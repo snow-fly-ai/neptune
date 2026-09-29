@@ -4,6 +4,7 @@ import { phoneClient } from './client';
 import { AuthScreen } from './AuthScreen';
 import { ChatList } from './ChatList';
 import { ChatScreen } from './ChatScreen';
+import { UsageScreen } from './UsageScreen';
 import { ensureNotifyPermission, notify } from '../lib/notify';
 import { useChats } from '../lib/useConversation';
 import { checkPhoneUpdate, type PhoneUpdate } from '../lib/updates';
@@ -23,9 +24,12 @@ export function PhoneApp() {
   return session ? <Home session={session} /> : <AuthScreen />;
 }
 
-/** Chat list ⇄ chat. Opening a chat pushes a history entry so Android's back button returns to the list. */
+type NavState = { chat?: string; usage?: boolean } | null;
+
+/** Chat list ⇄ chat / usage. Opening one pushes a history entry so Android's back button returns to the list. */
 function Home({ session }: { session: Session }) {
   const [openId, setOpenId] = useState<string | null>(null);
+  const [usage, setUsage] = useState(false);
   const [update, setUpdate] = useState<PhoneUpdate | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const startedAt = useRef(Date.now());
@@ -38,13 +42,17 @@ function Home({ session }: { session: Session }) {
     if (document.visibilityState === 'visible' && openRef.current === m.chat_id) return;
     const chat = chats.find((c) => c.id === m.chat_id);
     const agent = agents.find((a) => a.id === chat?.agent_id);
-    notify(m.sender === 'agent' ? (agent?.name ?? 'Relay') : 'Relay', m.body);
+    notify(m.sender === 'agent' ? (agent?.name ?? 'Nebula') : 'Nebula', m.body);
   });
 
   useEffect(() => {
     ensureNotifyPermission();
     checkPhoneUpdate().then(setUpdate).catch(() => {});
-    const onPop = () => setOpenId((history.state as { chat?: string } | null)?.chat ?? null);
+    const onPop = () => {
+      const st = history.state as NavState;
+      setOpenId(st?.chat ?? null);
+      setUsage(!!st?.usage);
+    };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
@@ -59,9 +67,17 @@ function Home({ session }: { session: Session }) {
     history.pushState({ chat: chat.id }, '');
     setOpenId(chat.id);
   }, []);
+  const openUsage = useCallback(() => {
+    history.pushState({ usage: true }, '');
+    setUsage(true);
+  }, []);
   const back = useCallback(() => {
-    if ((history.state as { chat?: string } | null)?.chat) history.back();
-    else setOpenId(null);
+    const st = history.state as NavState;
+    if (st?.chat || st?.usage) history.back();
+    else {
+      setOpenId(null);
+      setUsage(false);
+    }
   }, []);
 
   const create = async (agentId: string) => {
@@ -75,7 +91,9 @@ function Home({ session }: { session: Session }) {
 
   return (
     <>
-      {chat ? (
+      {usage ? (
+        <UsageScreen agents={agents} chats={chats} onBack={back} />
+      ) : chat ? (
         <ChatScreen
           key={chat.id}
           chat={chat}
@@ -93,6 +111,7 @@ function Home({ session }: { session: Session }) {
             live={live}
             loaded={loaded}
             onOpen={open}
+            onUsage={openUsage}
             onCreate={create}
             onCheckUpdates={async () => {
               const u = await checkPhoneUpdate().catch(() => null);
@@ -103,7 +122,7 @@ function Home({ session }: { session: Session }) {
             banner={
               update && (
                 <button className="update-banner" onClick={() => openExternal(update.url)}>
-                  <span>Relay {update.version} is available</span>
+                  <span>Nebula {update.version} is available</span>
                   <b>Download</b>
                 </button>
               )

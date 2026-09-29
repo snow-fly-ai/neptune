@@ -95,9 +95,12 @@ export function ChatScreen({
     onDeleted();
   };
 
+  const paused = online && !!agent?.paused;
   const statusLine = working
     ? 'executing directive'
-    : online
+    : paused
+      ? 'paused on the PC · messages will queue'
+      : online
       ? 'link secure · online'
       : `offline · seen ${ago(agent?.last_seen ?? null, now)}`;
 
@@ -115,8 +118,8 @@ export function ChatScreen({
             {name.toUpperCase()}
             <small>// {chat.title || 'NEW CHAT'}</small>
           </div>
-          <div className={`sub ${working ? 'accent' : online ? 'on' : ''}`}>
-            <span className={`led ${working ? 'busy' : online ? 'on' : ''}`} />
+          <div className={`sub ${working ? 'accent' : paused ? 'paused' : online ? 'on' : ''}`}>
+            <span className={`led ${working ? 'busy' : paused ? 'paused' : online ? 'on' : ''}`} />
             {statusLine}
             {!live && <span className="reconnecting"> · reconnecting</span>}
           </div>
@@ -190,7 +193,7 @@ export function ChatScreen({
       />
 
       <ActivityBar activity={activity} working={working} since={current?.updated_at} onStop={() => send('/stop').catch(() => {})} />
-      <Composer placeholder={online ? 'Enter directive…' : 'Enter directive (queued until agent is back)'} onSend={send} enterSends={false} />
+      <Composer placeholder={online && !paused ? 'Enter directive…' : 'Enter directive (queued until agent is back)'} onSend={send} enterSends={false} />
     </div>
   );
 }

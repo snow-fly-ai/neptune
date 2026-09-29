@@ -1,4 +1,4 @@
-package com.snowfly.relay
+package com.snowfly.nebula
 
 import android.graphics.Color
 import android.os.Bundle

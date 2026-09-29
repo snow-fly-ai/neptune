@@ -12,13 +12,13 @@ import { appVersion } from '../lib/updates';
 import { inTauri } from '../lib/platform';
 import { isOnline, useChats, useConversation, useNow } from '../lib/useConversation';
 import { AGENT_EMAIL, OWNER_EMAIL } from '../lib/config';
-import type { Chat, Message } from '../lib/types';
+import type { Agent, Chat, Message } from '../lib/types';
 import { MessageList } from '../ui/MessageList';
 import { Composer } from '../ui/Composer';
 import { ActivityBar } from '../ui/ActivityBar';
 import { Reticle } from '../ui/Reticle';
 import { Logo, XIcon } from '../ui/icons';
-import { clock } from '../ui/time';
+import { ago, clock } from '../ui/time';
 import './ops.css';
 
 const UPDATE_CHECK_MS = 3 * 60 * 60 * 1000;
@@ -51,8 +51,8 @@ function Setup({ boot, onDone }: { boot: { config: BridgeConfig; host: HostInfo 
     <div className="bridge-setup">
       <div className="auth-card">
         <Reticle size={170} detail="lite" />
-        <h1>RELAY BRIDGE</h1>
-        <p className="lede">This PC runs your coding agents (Claude, Codex) for your phone. Paste the bridge key to connect it to the Relay backend.</p>
+        <h1>NEBULA BRIDGE</h1>
+        <p className="lede">This PC runs your coding agents (Claude, Codex) for your phone. Paste the bridge key to connect it to the Nebula backend.</p>
         <input className="plain-input" placeholder="Bridge key" value={key} onChange={(e) => setKey(e.target.value)} />
         <button
           className="primary"
@@ -110,7 +110,7 @@ function Console({ config, host, version }: { config: BridgeConfig; host: HostIn
   const [modal, setModal] = useState<'transmit' | 'config' | null>(null);
   const [autostart, setAutostart] = useState<boolean | null>(null);
   const [updateState, setUpdateState] = useState<string>('');
-  const [awake, setAwake] = useState(() => localStorage.getItem('relay.awake') !== '0');
+  const [awake, setAwake] = useState(() => localStorage.getItem('nebula.awake') !== '0');
   const bootAt = useRef(Date.now());
 
   useEffect(() => {
@@ -120,13 +120,24 @@ function Console({ config, host, version }: { config: BridgeConfig; host: HostIn
     };
   }, [engine]);
 
+  // First run after the rename: retire the old "Relay" install so two bridges don't run.
+  useEffect(() => {
+    if (!inTauri() || localStorage.getItem('nebula.legacyRemoved')) return;
+    invoke<boolean>('remove_legacy_install')
+      .then((removed) => {
+        localStorage.setItem('nebula.legacyRemoved', '1');
+        if (removed) engine.note('Removed the old Relay app from this PC');
+      })
+      .catch(() => {});
+  }, [engine]);
+
   // Start with Windows by default so the phone can always reach Claude.
   useEffect(() => {
     (async () => {
       let on = await autostartEnabled();
-      if (!on && !localStorage.getItem('relay.autostart.touched')) {
+      if (!on && !localStorage.getItem('nebula.autostart.touched')) {
         await enableAutostart();
-        localStorage.setItem('relay.autostart.touched', '1');
+        localStorage.setItem('nebula.autostart.touched', '1');
         on = true;
       }
       setAutostart(on);
@@ -135,7 +146,7 @@ function Console({ config, host, version }: { config: BridgeConfig; host: HostIn
 
   // Keep the display on so the console stays up while nobody is at the PC.
   useEffect(() => {
-    localStorage.setItem('relay.awake', awake ? '1' : '0');
+    localStorage.setItem('nebula.awake', awake ? '1' : '0');
     if (inTauri()) invoke('keep_awake', { on: awake }).catch(() => {});
   }, [awake]);
 
@@ -188,7 +199,7 @@ function Console({ config, host, version }: { config: BridgeConfig; host: HostIn
       <header className="ops-top">
         <div className="ops-brand">
           <Logo size={22} />
-          <b>RELAY</b>
+          <b>NEBULA</b>
           <span className="dim">// OPS CONSOLE</span>
           <span className="stamp-tag">EYES ONLY</span>
         </div>
@@ -199,6 +210,10 @@ function Console({ config, host, version }: { config: BridgeConfig; host: HostIn
           <Chip on label="NODE" value={host.machine} />
         </div>
         <div className="ops-actions">
+          <button className={`ops-btn ${snap.running ? '' : 'hot'}`} onClick={() => (snap.running ? engine.stop() : engine.start())} title="Pause or resume every agent on this PC">
+            {snap.running ? '❚❚ Pause all' : '▶ Resume all'}
+          </button>
+          <button className="ops-btn danger" disabled={!snap.busy} onClick={() => engine.stopCurrent()} title="Stop every running task">■ Stop all</button>
           <button className="ops-btn" onClick={() => setModal('transmit')}>▲ Transmit</button>
           <button className="ops-btn" onClick={() => setModal('config')}>⚙ Config</button>
         </div>
@@ -229,9 +244,6 @@ function Console({ config, host, version }: { config: BridgeConfig; host: HostIn
             <KV k="UPTIME" v={tele.cur ? fmtUptime(tele.cur.uptime) : '—'} g />
             <KV k="AGENT" v={mask(AGENT_EMAIL)} />
             <KV k="OPERATOR" v={mask(OWNER_EMAIL)} />
-            {workers.map((w) => (
-              <KV key={w.id} k={w.name.toUpperCase()} v={w.binary ? (w.busy ? 'EXECUTING' : 'READY') : 'NOT INSTALLED'} g={!!w.binary} />
-            ))}
             <KV k="CLEARANCE" v={permLabel(snap.config.permissionMode)} g />
             <KV k="CHATS" v={String(chats.length)} />
             <KV k="BUILD" v={`v${version}`} />
@@ -246,13 +258,16 @@ function Console({ config, host, version }: { config: BridgeConfig; host: HostIn
         </div>
 
         <div className="ops-col">
-          <Panel n="04" title="Event log" tone="green" right={<Spinner size={13} />} className="grow">
+          <Panel n="06" title="Agents" right={<span className="dim">{agents.filter((a) => isOnline(a, now)).length}/{workers.length} ONLINE</span>}>
+            <AgentsPanel workers={workers} agents={agents} running={snap.running} now={now} engine={engine} />
+          </Panel>
+          <Panel n="07" title="Event log" tone="green" right={<Spinner size={13} />} className="grow">
             <EventLog log={snap.log} />
           </Panel>
-          <Panel n="06" title="Packet inspector" tone="green" right={<span className="dim">{fmtBytes((tele.cur?.rx ?? 0) + (tele.cur?.tx ?? 0), true)}</span>}>
+          <Panel n="08" title="Packet inspector" tone="green" right={<span className="dim">{fmtBytes((tele.cur?.rx ?? 0) + (tele.cur?.tx ?? 0), true)}</span>}>
             <HexStream rate={Math.min(1, ((tele.cur?.rx ?? 0) + (tele.cur?.tx ?? 0)) / (512 * 1024))} />
           </Panel>
-          <Panel n="07" title="Link & mission" right={<CountdownRing period={HEARTBEAT_MS} />}>
+          <Panel n="09" title="Link & mission" right={<CountdownRing period={HEARTBEAT_MS} />}>
             <div className="lat-row">
               <div>
                 <span className="k">LATENCY</span>
@@ -289,6 +304,64 @@ function Console({ config, host, version }: { config: BridgeConfig; host: HostIn
           <ConfigForm engine={engine} snap={snap} host={host} autostart={autostart} setAutostart={setAutostart} awake={awake} setAwake={setAwake} updateState={updateState} />
         </Modal>
       )}
+    </div>
+  );
+}
+
+/** Every agent on this PC: what the phone sees, what it's doing, its plan usage, and its controls. */
+function AgentsPanel({
+  workers,
+  agents,
+  running,
+  now,
+  engine,
+}: {
+  workers: EngineSnapshot['workers'][string][];
+  agents: Agent[];
+  running: boolean;
+  now: number;
+  engine: BridgeEngine;
+}) {
+  return (
+    <div className="agents">
+      {workers.map((w) => {
+        const row = agents.find((a) => a.id === w.id);
+        const online = isOnline(row, now);
+        const state = !w.binary ? 'missing' : !running ? 'off' : w.current ? 'busy' : w.paused ? 'paused' : online ? 'ready' : 'off';
+        const label = { missing: 'NOT INSTALLED', off: running ? 'CONNECTING' : 'BRIDGE PAUSED', busy: 'EXECUTING', paused: 'PAUSED', ready: 'ONLINE' }[state];
+        const line = !w.binary
+          ? `Install the ${w.name} CLI to bring it online`
+          : w.current
+            ? w.activity || 'Working…'
+            : w.paused
+              ? 'New messages wait in its queue'
+              : row?.last_seen
+                ? `Heartbeat ${ago(row.last_seen, now)}`
+                : 'Waiting for first heartbeat';
+        return (
+          <div key={w.id} className={`agent-row ag-${state}`}>
+            <div className="agent-top">
+              <i className="dot" />
+              <b>{w.name.toUpperCase()}</b>
+              <span className="agent-state">{label}</span>
+              <div className="agent-btns">
+                <button className="mini" disabled={!w.binary} onClick={() => engine.setPaused(w.id, !w.paused)}>
+                  {w.paused ? '▶ Resume' : '❚❚ Pause'}
+                </button>
+                <button className="mini danger" disabled={!w.current} onClick={() => engine.stopCurrent(w.id)}>■ Stop</button>
+              </div>
+            </div>
+            <div className="agent-line">{line}</div>
+            {row?.usage?.windows.map((u) => (
+              <div key={u.id} className="agent-usage" title={u.resets_at ? `Resets ${new Date(u.resets_at).toLocaleString()}` : undefined}>
+                <span>{u.label.toUpperCase()}</span>
+                <Meter pct={u.pct} tone={u.pct >= 85 ? 'warn' : 'green'} />
+                <b>{Math.round(u.pct)}%</b>
+              </div>
+            ))}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -589,7 +662,7 @@ function ConfigForm({
   return (
     <div className="config">
       <button className="secondary" onClick={() => (snap.running ? engine.stop() : engine.start())}>
-        {snap.running ? '❚❚ Pause bridge' : '▶ Resume bridge'}
+        {snap.running ? '❚❚ Pause all agents' : '▶ Resume all agents'}
       </button>
       <label className="setting">
         <span>Workspace</span>
@@ -636,7 +709,7 @@ function ConfigForm({
           type="checkbox"
           checked={!!autostart}
           onChange={async (e) => {
-            localStorage.setItem('relay.autostart.touched', '1');
+            localStorage.setItem('nebula.autostart.touched', '1');
             if (e.target.checked) await enableAutostart();
             else await disableAutostart();
             setAutostart(await autostartEnabled());

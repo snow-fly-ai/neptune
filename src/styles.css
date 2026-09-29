@@ -558,3 +558,30 @@ input, textarea, select { font: inherit; color: inherit; }
 .sheet-title { padding: 10px 10px 8px; font: 600 10px var(--mono); letter-spacing: 0.18em; text-transform: uppercase; color: var(--blue-hi); }
 .sheet button { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px; text-align: left; border-radius: var(--radius); }
 .sheet button:active, .sheet button:hover { background: var(--blue-soft); }
+
+/* ---------- paused agents ---------- */
+.led.paused { background: var(--warn); box-shadow: 0 0 6px rgba(245, 184, 61, 0.6); }
+.who .sub.paused { color: var(--warn); }
+
+/* ---------- usage ---------- */
+.usage { flex: 1; overflow-y: auto; padding: 4px 12px 24px; display: flex; flex-direction: column; gap: 12px; }
+.usage-card { border: 1px solid var(--border); background: var(--surface); border-radius: var(--radius); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.usage-head { display: flex; align-items: center; gap: 10px; }
+.usage-head b { font: 600 14px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; }
+.usage-state { margin-left: auto; font: 500 10.5px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+.usage-state.on { color: var(--green); }
+.usage-state.paused { color: var(--warn); }
+.usage-label { margin-top: 4px; font: 600 10px var(--mono); letter-spacing: 0.18em; text-transform: uppercase; color: var(--blue-hi); }
+.limit { display: flex; flex-direction: column; gap: 4px; }
+.limit-top { display: flex; justify-content: space-between; font: 500 12px var(--mono); color: var(--text-2); }
+.limit-top b { color: var(--text); }
+.limit-top b.warn { color: var(--warn); }
+.bar { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
+.bar i { display: block; height: 100%; border-radius: 3px; background: var(--green); }
+.bar i.warn { background: var(--warn); }
+.limit-sub, .usage-note { font: 11px var(--mono); color: var(--muted); letter-spacing: 0.03em; }
+.usage-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.ustat { display: flex; flex-direction: column; gap: 2px; padding: 8px; background: var(--surface-2); border-radius: var(--radius); }
+.ustat span { font: 500 9.5px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+.ustat b { font: 600 15px var(--mono); color: var(--text); }
+.usage-foot { font: 11px var(--mono); color: var(--muted); line-height: 1.5; margin: 0 2px; }

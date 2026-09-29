@@ -32,18 +32,34 @@ pub struct BridgeConfig {
     pub model: String,
     pub codex_path: String,
     pub codex_model: String,
+    /// Agents paused on this PC: online, but their queue waits.
+    pub paused_agents: Vec<String>,
 }
 
-/// `~/.relay/bridge.json`. Kept out of AppData so tools running inside
+/// `~/.nebula/bridge.json`. Kept out of AppData so tools running inside
 /// packaged (MSIX) apps, like the Claude desktop app, see the same file.
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
     let home = app.path().home_dir().map_err(|e| e.to_string())?;
-    Ok(home.join(".relay").join("bridge.json"))
+    Ok(home.join(".nebula").join("bridge.json"))
+}
+
+/// Before the rename to Nebula the config lived in `~/.relay`. Copied, not moved,
+/// so an old bridge still running during the upgrade keeps working.
+async fn adopt_legacy_config(path: &Path) {
+    let Some(legacy) = path.parent().and_then(Path::parent).map(|h| h.join(".relay").join("bridge.json")) else { return };
+    if path.exists() || !legacy.is_file() {
+        return;
+    }
+    if let Some(dir) = path.parent() {
+        let _ = tokio::fs::create_dir_all(dir).await;
+    }
+    let _ = tokio::fs::copy(&legacy, path).await;
 }
 
 #[tauri::command]
 pub async fn load_config(app: AppHandle) -> Result<BridgeConfig, String> {
     let path = config_path(&app)?;
+    adopt_legacy_config(&path).await;
     match tokio::fs::read_to_string(&path).await {
         Ok(text) => serde_json::from_str(&text).map_err(|e| format!("Invalid {}: {e}", path.display())),
         Err(_) => Ok(BridgeConfig::default()),
@@ -177,6 +193,68 @@ fn find_codex() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Codex session logs: `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-…-<thread>.jsonl`.
+fn find_rollout(dir: &Path, thread: &str, depth: u32) -> Option<PathBuf> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).collect();
+    // Newest first: the thread was just used.
+    entries.sort_by(|a, b| b.cmp(a));
+    for p in entries {
+        if p.is_dir() {
+            if depth > 0 {
+                if let Some(found) = find_rollout(&p, thread, depth - 1) {
+                    return Some(found);
+                }
+            }
+        } else if p.file_name().is_some_and(|n| n.to_string_lossy().contains(thread)) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// The last `rate_limits` Codex logged for a thread (its plan usage), if any.
+#[tauri::command]
+pub async fn codex_rate_limits(thread_id: String) -> Option<Value> {
+    let home = std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| {
+        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(|h| PathBuf::from(h).join(".codex"))
+    })?;
+    let file = find_rollout(&home.join("sessions"), &thread_id, 3)?;
+    let text = tokio::fs::read_to_string(file).await.ok()?;
+    text.lines().rev().filter(|l| l.contains("rate_limits")).find_map(|l| {
+        let v: Value = serde_json::from_str(l).ok()?;
+        let limits = v.pointer("/payload/rate_limits").or_else(|| v.get("rate_limits"))?;
+        (!limits.is_null()).then(|| limits.clone())
+    })
+}
+
+/// Removes the pre-rename "Relay" desktop app: its autostart entry and its install.
+/// The Relay updater hands over to the Nebula installer and exits, so it isn't running.
+#[tauri::command]
+pub fn remove_legacy_install() -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let Some(local) = std::env::var_os("LOCALAPPDATA") else { return false };
+        let dir = PathBuf::from(local).join("Relay");
+        let uninstaller = dir.join("uninstall.exe");
+        let _ = std::process::Command::new("reg")
+            .args(["delete", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Relay", "/f"])
+            .creation_flags(0x0800_0000)
+            .status();
+        if !uninstaller.is_file() {
+            return false;
+        }
+        let _ = std::process::Command::new("taskkill").args(["/IM", "relay.exe", "/F"]).creation_flags(0x0800_0000).status();
+        return std::process::Command::new(uninstaller)
+            .arg("/S")
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .is_ok();
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 #[tauri::command]

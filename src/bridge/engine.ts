@@ -1,7 +1,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { notify } from '../lib/notify';
 import { SUPABASE_URL } from '../lib/config';
-import type { Message } from '../lib/types';
+import type { AgentUsage, Message } from '../lib/types';
 import { ADAPTERS, type AgentAdapter, type TaskOutcome } from './agents';
 import { cancelProcess, hostInfo, saveConfig, type BridgeConfig, type HostInfo } from './native';
 import { inTauri } from '../lib/platform';
@@ -27,8 +27,11 @@ export interface WorkerState {
   /** CLI path, or null when that agent isn't installed here. */
   binary: string | null;
   busy: boolean;
+  /** Paused on this PC: stays online, leaves its queue alone. */
+  paused: boolean;
   current: Message | null;
   activity: string | null;
+  usage: AgentUsage | null;
 }
 
 export interface EngineSnapshot {
@@ -68,7 +71,16 @@ export class BridgeEngine {
     });
     const workers: Record<string, WorkerState> = {};
     for (const a of ADAPTERS) {
-      workers[a.id] = { id: a.id, name: a.name, binary: a.binary(config, host), busy: false, current: null, activity: null };
+      workers[a.id] = {
+        id: a.id,
+        name: a.name,
+        binary: a.binary(config, host),
+        busy: false,
+        paused: (config.pausedAgents ?? []).includes(a.id),
+        current: null,
+        activity: null,
+        usage: null,
+      };
     }
     this.snapshot = {
       loginCode: null,
@@ -199,16 +211,43 @@ export class BridgeEngine {
     if (Date.parse(c.expires_at) < Date.now()) return;
     this.set({ loginCode: c });
     this.log('info', `Sign-in code requested for ${c.email}`);
-    notify('Relay sign-in code', `${c.code} for ${c.email}`);
+    notify('Nebula sign-in code', `${c.code} for ${c.email}`);
+  }
+
+  /** A line in the console's event log. */
+  note(text: string) {
+    this.log('info', text);
   }
 
   dismissLoginCode() {
     this.set({ loginCode: null });
   }
 
+  /** Pausing lets a running task finish; the agent just stops taking new ones until resumed. */
+  async setPaused(agent: string, paused: boolean) {
+    const w = this.snapshot.workers[agent];
+    if (!w || w.paused === paused) return;
+    this.setWorker(agent, { paused });
+    const list = new Set(this.config.pausedAgents ?? []);
+    if (paused) list.add(agent);
+    else list.delete(agent);
+    await this.updateConfig({ pausedAgents: [...list] });
+    this.log('info', paused ? 'Paused · new messages wait in its queue' : 'Resumed', agent);
+    if (this.snapshot.running) {
+      await this.client.from('agents').update({ paused }).eq('id', agent);
+      if (!paused) this.kick(ADAPTERS.find((a) => a.id === agent)!);
+    }
+  }
+
+  private async saveUsage(agent: string, usage: AgentUsage) {
+    this.setWorker(agent, { usage });
+    const { error } = await this.client.from('agents').update({ usage }).eq('id', agent);
+    if (error) this.log('error', `Could not save usage: ${error.message}`, agent);
+  }
+
   private goOffline = async () => {
     const ids = ADAPTERS.map((a) => a.id);
-    await this.client.from('agents').update({ online: false, activity: null, current_chat_id: null }).in('id', ids);
+    await this.client.from('agents').update({ online: false, paused: false, activity: null, current_chat_id: null }).in('id', ids);
   };
 
   private async heartbeat() {
@@ -219,6 +258,7 @@ export class BridgeEngine {
         id: a.id,
         name: a.name,
         online: true,
+        paused: w.paused,
         last_seen: new Date().toISOString(),
         machine: this.host.machine,
         version: this.version,
@@ -262,7 +302,7 @@ export class BridgeEngine {
       .eq('chats.agent_id', a.id);
     for (const m of (data ?? []) as { id: string; chat_id: string }[]) {
       await this.client.from('messages').update({ status: 'error' }).eq('id', m.id);
-      await this.reply(m.chat_id, m.id, 'That task was interrupted because the Relay bridge restarted. Send it again if you still need it.', 'system');
+      await this.reply(m.chat_id, m.id, 'That task was interrupted because the Nebula bridge restarted. Send it again if you still need it.', 'system');
     }
   }
 
@@ -279,11 +319,12 @@ export class BridgeEngine {
 
   /** Works one agent's queue, one task at a time. Different agents run side by side. */
   private async kick(a: AgentAdapter) {
-    if (!this.snapshot.running || this.snapshot.workers[a.id].busy) return;
+    const w = this.snapshot.workers[a.id];
+    if (!this.snapshot.running || w.busy || w.paused) return;
     this.setWorker(a.id, { busy: true });
     try {
       let m: Message | null;
-      while (this.snapshot.running && (m = await this.claimNext(a.id))) {
+      while (this.snapshot.running && !this.snapshot.workers[a.id].paused && (m = await this.claimNext(a.id))) {
         this.setWorker(a.id, { current: m });
         await this.handle(a, m);
         this.setWorker(a.id, { current: null });
@@ -368,7 +409,7 @@ export class BridgeEngine {
   private async runTask(a: AgentAdapter, m: Message, retried = false): Promise<void> {
     const binary = a.binary(this.config, this.host);
     if (!binary) {
-      await this.reply(m.chat_id, m.id, `I can’t find the ${a.name} CLI on the PC. Install it, or set its path in the Relay bridge config.`, 'system');
+      await this.reply(m.chat_id, m.id, `I can’t find the ${a.name} CLI on the PC. Install it, or set its path in the Nebula bridge config.`, 'system');
       return this.finish(m, 'error');
     }
     const cwd = this.workspace();
@@ -389,6 +430,9 @@ export class BridgeEngine {
           },
           session: (id) => {
             if (id !== sessionId) this.setChatSession(m.chat_id, id);
+          },
+          usage: (u) => {
+            this.saveUsage(a.id, u);
           },
         },
       );

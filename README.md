@@ -1,9 +1,9 @@
-# Relay
+# Nebula
 
 Message the coding agents on your PC (Claude Code, Codex, …) from your phone. The agent works on the task and pings you when it's done.
 
-- **Phone (Android):** chat client. Sign in with your email (6-digit code). A chat list shows every conversation with every agent (filter by agent); open any chat to continue it, or start a new one with any agent. Watch live progress and get a notification when a reply lands.
-- **Desktop (Windows):** the bridge, shown as a full-screen ops console: live CPU, memory and network telemetry (from the native `sys_stats` command), an event log, a packet stream, and a central animated reticle that speeds up while Claude works. It keeps the display awake (`keep_awake`). Sending a note to the phone and the bridge settings are in the Transmit and Config dialogs. F11 toggles full screen.
+- **Phone (Android):** chat client. Sign in with your email (6-digit code). A chat list shows every conversation with every agent (filter by agent); open any chat to continue it, or start a new one with any agent. Watch live progress and get a notification when a reply lands. **Usage** (menu) shows each agent's plan limits (Claude's 5-hour and weekly windows, Codex's primary/secondary) as its CLI last reported them, plus tasks, tokens and API-equivalent cost for today / 7 / 30 days.
+- **Desktop (Windows):** the bridge, shown as a full-screen ops console: live CPU, memory and network telemetry (from the native `sys_stats` command), an event log, a packet stream, and a central animated reticle that speeds up while Claude works. It keeps the display awake (`keep_awake`). The **Agents** panel lists every agent with what the phone sees (online, paused, executing), its plan usage, and **Pause/Resume** and **Stop** buttons; **Pause all / Stop all** in the top bar cover the whole bridge. A paused agent stays online but leaves its queue alone until resumed (kept in `pausedAgents` in the bridge config). Sending a note to the phone and the bridge settings are in the Transmit and Config dialogs. F11 toggles full screen.
 - **Theme:** green (#22C55E) marks live machine output and the agent. Blue (#2563EB) marks structure and anything you send.
 - **Desktop bridge internals:** It lives in the tray, picks up queued messages for every agent it finds installed, runs them headlessly (`claude -p --output-format stream-json`, `codex exec --json`), streams "what I'm doing now" to the phone, and posts the final answer back. Each agent works its own queue, so Claude and Codex can run at the same time.
 - **Backend:** Supabase (Postgres, realtime and auth). Row-level security only lets the allow-listed owner email read or send messages.
@@ -19,7 +19,7 @@ Both apps are the same Tauri 2 + React codebase. The platform decides the mode (
 
 ## Agents and chats
 
-- `agents`: one row per agent (`claude`, `codex`, …) with presence (`online`, `last_seen`), `activity` and `current_chat_id`.
+- `agents`: one row per agent (`claude`, `codex`, …) with presence (`online`, `last_seen`), `paused`, `activity`, `current_chat_id` and `usage` (latest plan-limit snapshot).
 - `chats`: belongs to one agent; `session_id` is the agent's own conversation id (Claude session, Codex thread), so every chat resumes where it left off.
 - `messages`: every message has a `chat_id`. `sender` is `user`, `agent` or `system`.
 
@@ -48,8 +48,8 @@ Either add an adapter to `ADAPTERS` in `src/bridge/agents.ts` (and a row in `age
 
 Push a tag `vX.Y.Z` and GitHub Actions builds:
 
-- `Relay_X.Y.Z_x64-setup.exe` + `latest.json`. The desktop bridge auto-updates from these via `tauri-plugin-updater`.
-- `Relay_X.Y.Z_android.apk`, signed with a fixed keystore so it installs over the previous version. The phone app shows an "update available" banner that downloads it.
+- `Nebula_X.Y.Z_x64-setup.exe` + `latest.json`. The desktop bridge auto-updates from these via `tauri-plugin-updater`.
+- `Nebula_X.Y.Z_android.apk`, signed with a fixed keystore so it installs over the previous version. The phone app shows an "update available" banner that downloads it.
 
 ```bash
 node scripts/bump.mjs 0.2.0
@@ -65,9 +65,16 @@ git push --follow-tags
 | `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Signs desktop updates |
 | `ANDROID_KEY_BASE64` / `ANDROID_KEY_PASSWORD` / `ANDROID_KEY_ALIAS` | Signs the APK |
 
+## Renamed from Relay
+
+Until v0.3.0 the app was called Relay (`com.snowfly.relay`). From v0.4.0 it's Nebula (`com.snowfly.nebula`):
+
+- **Desktop:** Relay's auto-updater installs Nebula. On first run Nebula copies `~/.relay/bridge.json` to `~/.nebula/bridge.json`, removes Relay's autostart entry and runs Relay's uninstaller.
+- **Android:** the package name changed, so Nebula installs next to Relay. Sign in once, then uninstall Relay.
+
 ## Bridge config
 
-`~/.relay/bridge.json` (never committed; kept outside AppData so MSIX-packaged tools see the same file):
+`~/.nebula/bridge.json` (never committed; kept outside AppData so MSIX-packaged tools see the same file):
 
 ```json
 { "serviceKey": "…", "workspace": "C:\\Users\\you", "permissionMode": "bypassPermissions", "claudePath": "", "model": "", "codexPath": "", "codexModel": "" }

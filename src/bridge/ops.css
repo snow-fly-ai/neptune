@@ -331,3 +331,38 @@
 @media (max-height: 700px) {
   .feed-panel { height: 150px; }
 }
+
+/* ---------- header controls ---------- */
+.ops-btn.hot { border-color: var(--green); color: var(--green); background: rgba(34, 197, 94, 0.12); }
+.ops-btn.danger { color: var(--danger); border-color: rgba(244, 63, 94, 0.45); background: rgba(244, 63, 94, 0.08); }
+.ops-btn.danger:hover:not(:disabled) { background: rgba(244, 63, 94, 0.22); color: #fff; }
+.ops-btn:disabled, .mini:disabled { opacity: 0.35; cursor: default; pointer-events: none; }
+
+/* ---------- agents panel ---------- */
+.agents { display: flex; flex-direction: column; gap: 8px; }
+.agent-row { display: flex; flex-direction: column; gap: 4px; padding: 7px 8px; border: 1px solid var(--border); background: rgba(37, 99, 235, 0.05); }
+.agent-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.agent-top .dot { width: 7px; height: 7px; border-radius: 50%; background: #475569; flex: none; }
+.agent-top b { color: var(--text); font-size: 11px; letter-spacing: 0.14em; }
+.agent-state { font-size: 9.5px; letter-spacing: 0.14em; color: var(--muted); }
+.agent-btns { margin-left: auto; display: flex; gap: 4px; flex: none; }
+.mini {
+  height: 20px; padding: 0 7px;
+  border: 1px solid var(--border-strong); background: var(--blue-soft); color: var(--blue-hi);
+  font: 600 9.5px var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
+}
+.mini:hover { background: rgba(37, 99, 235, 0.3); color: #fff; }
+.mini.danger { color: var(--danger); border-color: rgba(244, 63, 94, 0.45); background: rgba(244, 63, 94, 0.08); }
+.agent-line { font-size: 10.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-usage { display: grid; grid-template-columns: 92px 1fr 34px; align-items: center; gap: 6px; font-size: 9.5px; }
+.agent-usage span { color: var(--muted); letter-spacing: 0.1em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-usage b { text-align: right; color: var(--text); font-weight: 500; }
+.agent-usage .meter { height: 7px; }
+.ag-ready .dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.ag-ready .agent-state { color: var(--green); }
+.ag-busy .dot { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 0.9s infinite; }
+.ag-busy .agent-state, .ag-busy .agent-line { color: var(--green); }
+.ag-paused { border-color: rgba(245, 184, 61, 0.35); }
+.ag-paused .dot { background: var(--warn); }
+.ag-paused .agent-state { color: var(--warn); }
+.ag-missing { opacity: 0.6; }

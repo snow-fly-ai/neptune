@@ -13,7 +13,7 @@ export function AuthScreen() {
   const sendCode = async () => {
     setBusy(true);
     setError(null);
-    // Codes are delivered to the Relay bridge on the PC (see supabase/functions/request-code).
+    // Codes are delivered to the Nebula bridge on the PC (see supabase/functions/request-code).
     const { data, error } = await phoneClient.functions.invoke('request-code', {
       body: { email: email.trim().toLowerCase() },
     });
@@ -41,7 +41,7 @@ export function AuthScreen() {
     <div className="auth">
       <div className="auth-card">
         <Reticle size={170} detail="lite" state={busy ? 'busy' : 'idle'} />
-        <h1>RELAY</h1>
+        <h1>NEBULA</h1>
         <p className="lede">Secure uplink to Claude on your PC. It works while you're away and reports back when done.</p>
         <div className="auth-steps">
           <span className="on">01 IDENTIFY</span>—<span className={step === 'code' ? 'on' : ''}>02 VERIFY</span>—<span>03 LINK</span>
@@ -78,7 +78,7 @@ export function AuthScreen() {
             }}
           >
             <p className="hint">
-              Your code for <b>{email}</b> is showing in the Relay bridge on your PC.
+              Your code for <b>{email}</b> is showing in the Nebula bridge on your PC.
             </p>
             <input
               className="code"

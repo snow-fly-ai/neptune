@@ -4,8 +4,8 @@
  * and reduces a run to one reply. Adding an agent = one adapter here plus its
  * row in the `agents` table.
  */
-import type { MessageMeta } from '../lib/types';
-import { runProcess, type BridgeConfig, type HostInfo } from './native';
+import type { AgentUsage, MessageMeta, UsageWindow } from '../lib/types';
+import { codexRateLimits, runProcess, type BridgeConfig, type HostInfo } from './native';
 
 export interface TaskInput {
   runId: string;
@@ -22,6 +22,8 @@ export interface TaskHooks {
   activity: (text: string, step?: boolean) => void;
   /** The CLI announced (or changed) the conversation id. */
   session: (id: string) => void;
+  /** The CLI reported the account's plan limits. */
+  usage: (usage: AgentUsage) => void;
 }
 
 export interface TaskOutcome {
@@ -48,8 +50,8 @@ export interface AgentAdapter {
 
 export function systemPrompt(agentName: string, host: HostInfo, cwd: string) {
   return [
-    `You are ${agentName}, running headlessly on the user's Windows PC "${host.machine}" through Relay, a chat app.`,
-    `The user is messaging you from the Relay app on their Android phone. They cannot see your terminal or tool output, only your final reply, which arrives as a push notification and chat message.`,
+    `You are ${agentName}, running headlessly on the user's Windows PC "${host.machine}" through Nebula, a chat app.`,
+    `The user is messaging you from the Nebula app on their Android phone. They cannot see your terminal or tool output, only your final reply, which arrives as a push notification and chat message.`,
     `Work autonomously and finish the task end-to-end; don't stop to ask for confirmation on routine steps. If you truly need a decision, ask one clear question and stop.`,
     `Finish with a concise, phone-friendly reply: lead with the outcome, then short bullets. Avoid long code blocks unless asked.`,
     `Working directory: ${cwd}.`,
@@ -62,9 +64,36 @@ const clip = (s: string, n = 90) => {
   return one.length > n ? `${one.slice(0, n - 1)}…` : one;
 };
 const nonEmpty = (s: string | null | undefined) => (s && s.trim() ? s.trim() : undefined);
+const epochIso = (secs: unknown) => (typeof secs === 'number' && secs > 0 ? new Date(secs * 1000).toISOString() : null);
+const pct = (n: unknown, scale = 1) => Math.max(0, Math.min(100, Math.round(Number(n) * scale * 10) / 10));
+const WINDOW_LABELS: Record<string, string> = {
+  five_hour: '5-hour',
+  seven_day: 'Weekly',
+  seven_day_opus: 'Weekly · Opus',
+  seven_day_sonnet: 'Weekly · Sonnet',
+};
 const STALE = /No conversation found|session.*not found|no rollout found|thread.*not found/i;
 
 // ---- Claude Code ----------------------------------------------------------------------
+
+/** `rate_limit_event` → plan usage. `unifiedWindows` lists every window; older CLIs report only the binding one. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function claudeUsage(info: any): AgentUsage | null {
+  if (!info) return null;
+  const windows: UsageWindow[] = [];
+  const all = info.unifiedWindows && typeof info.unifiedWindows === 'object' ? info.unifiedWindows : null;
+  if (all) {
+    for (const [id, w] of Object.entries(all) as [string, { utilization?: number; resetsAt?: number }][]) {
+      if (typeof w?.utilization !== 'number') continue;
+      windows.push({ id, label: WINDOW_LABELS[id] ?? id.replace(/_/g, ' '), pct: pct(w.utilization, 100), resets_at: epochIso(w.resetsAt) });
+    }
+  } else if (typeof info.utilization === 'number' && info.rateLimitType) {
+    const id = String(info.rateLimitType);
+    windows.push({ id, label: WINDOW_LABELS[id] ?? id, pct: pct(info.utilization, 100), resets_at: epochIso(info.resetsAt) });
+  }
+  if (!windows.length) return null;
+  return { windows, status: info.status, at: new Date().toISOString() };
+}
 
 /** One-line, human description of a Claude Code tool call for the phone's activity bar. */
 export function describeTool(name: string, input: Record<string, unknown> = {}): string {
@@ -115,6 +144,10 @@ const claude: AgentAdapter = {
     const res = await runProcess({ runId, program: this.binary(config, host)!, args, cwd, stdin: prompt }, (e) => {
       if (e.type === 'system' && e.subtype === 'init' && e.session_id) hooks.session(e.session_id);
       if (e.type === 'result') result = e;
+      if (e.type === 'rate_limit_event') {
+        const u = claudeUsage(e.rate_limit_info);
+        if (u) hooks.usage(u);
+      }
       if (e.type === 'assistant' && Array.isArray(e.message?.content)) {
         for (const c of e.message.content) {
           if (c.type === 'tool_use') hooks.activity(describeTool(c.name, c.input), true);
@@ -144,6 +177,11 @@ const claude: AgentAdapter = {
         session_id: result.session_id,
         turns: result.num_turns,
         is_error: result.is_error,
+        input_tokens: result.usage?.input_tokens,
+        output_tokens: result.usage?.output_tokens,
+        cache_read_tokens: result.usage?.cache_read_input_tokens,
+        cache_write_tokens: result.usage?.cache_creation_input_tokens,
+        model: Object.keys(result.modelUsage ?? {})[0],
       },
     };
   },
@@ -174,7 +212,26 @@ function describeCodexItem(item: any): string | null {
   }
 }
 
-/** Relay's permission modes mapped onto Codex's sandbox/approval flags. */
+/**
+ * Codex `rate_limits` ({ primary, secondary }, each { used_percent, window_minutes, resets_at | resets_in_seconds })
+ * → plan usage. Codex writes these into its session log rather than the exec stream.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function codexUsage(limits: any): AgentUsage | null {
+  if (!limits || typeof limits !== 'object') return null;
+  const windows: UsageWindow[] = [];
+  for (const key of ['primary', 'secondary']) {
+    const w = limits[key];
+    if (!w || typeof w.used_percent !== 'number') continue;
+    const mins = Number(w.window_minutes) || 0;
+    const label = mins === 300 ? '5-hour' : mins === 10080 ? 'Weekly' : mins ? (mins % 1440 ? `${Math.round(mins / 60)}-hour` : `${mins / 1440}-day`) : key;
+    const resets = epochIso(w.resets_at) ?? (typeof w.resets_in_seconds === 'number' ? new Date(Date.now() + w.resets_in_seconds * 1000).toISOString() : null);
+    windows.push({ id: key, label, pct: pct(w.used_percent), resets_at: resets });
+  }
+  return windows.length ? { windows, at: new Date().toISOString() } : null;
+}
+
+/** Nebula's permission modes mapped onto Codex's sandbox/approval flags. */
 function codexSandbox(mode: string) {
   if (mode === 'acceptEdits') return ['--full-auto'];
   if (mode === 'default') return ['--sandbox', 'read-only'];
@@ -187,10 +244,10 @@ const codex: AgentAdapter = {
   binary: (c, h) => nonEmpty(c.codexPath) ?? h.codexPath,
   model: (c) => c.codexModel,
   async run({ runId, prompt, cwd, sessionId, config, host }, hooks) {
-    // `codex exec` has no system-prompt flag, so a new thread gets the Relay context up front.
+    // `codex exec` has no system-prompt flag, so a new thread gets the Nebula context up front.
     const input = sessionId
       ? prompt
-      : `<relay_context>\n${systemPrompt('Codex', host, cwd)}\n</relay_context>\n\n${prompt}`;
+      : `<nebula_context>\n${systemPrompt('Codex', host, cwd)}\n</nebula_context>\n\n${prompt}`;
     const args = ['exec', '--json', '--skip-git-repo-check', '--cd', cwd, ...codexSandbox(config.permissionMode)];
     if (nonEmpty(config.codexModel)) args.push('--model', config.codexModel.trim());
     // A prompt of "-" reads it from stdin.
@@ -201,7 +258,7 @@ const codex: AgentAdapter = {
     let reply = '';
     let failure = '';
     let completed = false;
-    const usage = { input: 0, output: 0 };
+    const usage = { input: 0, cached: 0, output: 0 };
     const res = await runProcess({ runId, program: this.binary(config, host)!, args, cwd, stdin: input }, (e) => {
       switch (e.type) {
         case 'thread.started':
@@ -229,6 +286,7 @@ const codex: AgentAdapter = {
         case 'turn.completed':
           completed = true;
           usage.input += e.usage?.input_tokens ?? 0;
+          usage.cached += e.usage?.cached_input_tokens ?? 0;
           usage.output += e.usage?.output_tokens ?? 0;
           break;
         case 'turn.failed':
@@ -238,7 +296,15 @@ const codex: AgentAdapter = {
           failure = e.message || failure;
           break;
       }
+      if (e.rate_limits) {
+        const u = codexUsage(e.rate_limits);
+        if (u) hooks.usage(u);
+      }
     });
+    if (thread) {
+      const u = codexUsage(await codexRateLimits(thread).catch(() => null));
+      if (u) hooks.usage(u);
+    }
 
     const common = { cancelled: res.cancelled, stderr: res.stderr, exitCode: res.exitCode };
     const stale = !!sessionId && !thread && STALE.test(`${res.stderr} ${failure}`);
@@ -256,8 +322,11 @@ const codex: AgentAdapter = {
       meta: {
         duration_ms: Date.now() - started,
         session_id: thread ?? sessionId ?? undefined,
-        input_tokens: usage.input || undefined,
+        // Codex counts cached tokens inside input_tokens.
+        input_tokens: usage.input - usage.cached || undefined,
+        cache_read_tokens: usage.cached || undefined,
         output_tokens: usage.output || undefined,
+        model: nonEmpty(config.codexModel),
         is_error: isError,
       },
     };

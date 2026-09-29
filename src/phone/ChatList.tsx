@@ -15,6 +15,7 @@ export function ChatList({
   live,
   loaded,
   onOpen,
+  onUsage,
   onCreate,
   onCheckUpdates,
   onSignOut,
@@ -26,6 +27,7 @@ export function ChatList({
   live: boolean;
   loaded: boolean;
   onOpen: (chat: Chat) => void;
+  onUsage: () => void;
   onCreate: (agentId: string) => void;
   onCheckUpdates: () => void;
   onSignOut: () => void;
@@ -54,11 +56,12 @@ export function ChatList({
         </div>
         <div className="who">
           <div className="name">
-            RELAY<small>// CHANNELS</small>
+            NEBULA<small>// CHANNELS</small>
           </div>
           <div className={`sub ${onlineCount ? 'on' : ''}`}>
             <span className={`led ${busy ? 'busy' : onlineCount ? 'on' : ''}`} />
             {onlineCount}/{agents.length} agents online
+            {agents.some((a) => a.paused && isOnline(a, now)) && <span className="reconnecting"> · {agents.filter((a) => a.paused && isOnline(a, now)).length} paused</span>}
             {!live && <span className="reconnecting"> · reconnecting</span>}
           </div>
         </div>
@@ -73,6 +76,7 @@ export function ChatList({
                 Signed in as
                 <b>{session.user.email}</b>
               </div>
+              <button onClick={() => { setMenu(false); onUsage(); }}>Usage</button>
               <button onClick={() => { setMenu(false); onCheckUpdates(); }}>Check for updates</button>
               <button className="danger" onClick={() => { setMenu(false); onSignOut(); }}>Sign out</button>
             </div>
@@ -86,7 +90,7 @@ export function ChatList({
         </button>
         {agents.map((a) => (
           <button key={a.id} className={filter === a.id ? 'on' : ''} onClick={() => setFilter(a.id)}>
-            <span className={`led ${isOnline(a, now) ? 'on' : ''}`} />
+            <span className={`led ${isOnline(a, now) ? (a.paused ? 'paused' : 'on') : ''}`} />
             {a.name} <i>{chats.filter((c) => c.agent_id === a.id).length}</i>
           </button>
         ))}
@@ -110,7 +114,7 @@ export function ChatList({
             <button key={c.id} className={`chat-row ${working ? 'working' : ''}`} onClick={() => onOpen(c)}>
               <span className={`agent-badge a-${c.agent_id}`}>
                 {monogram(name)}
-                <i className={`led ${working ? 'busy' : isOnline(agent, now) ? 'on' : ''}`} />
+                <i className={`led ${working ? 'busy' : isOnline(agent, now) ? (agent.paused ? 'paused' : 'on') : ''}`} />
               </span>
               <span className="chat-main">
                 <span className="chat-top">
@@ -148,7 +152,7 @@ export function ChatList({
                   <span className="chat-main">
                     <b>{a.name}</b>
                     <span className={on ? 'g' : ''}>
-                      {on ? `Online · ${a.machine ?? 'PC'}` : a.last_seen ? `Offline · seen ${ago(a.last_seen, now)}` : 'Not set up on the PC yet'}
+                      {on ? `${a.paused ? 'Paused (messages will queue)' : 'Online'} · ${a.machine ?? 'PC'}` : a.last_seen ? `Offline · seen ${ago(a.last_seen, now)}` : 'Not set up on the PC yet'}
                     </span>
                   </span>
                 </button>

@@ -10,6 +10,10 @@ export interface MessageMeta {
   turns?: number;
   input_tokens?: number;
   output_tokens?: number;
+  /** Prompt tokens served from / written to the cache (Claude). */
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  model?: string;
 }
 
 export interface Message {
@@ -34,7 +38,27 @@ export interface Agent {
   machine: string | null;
   version: string | null;
   last_seen: string | null;
+  /** Paused on the desktop: online, but its queue waits. */
+  paused: boolean;
+  usage: AgentUsage | null;
   updated_at: string;
+}
+
+/** One plan-limit window, e.g. Claude's 5-hour or weekly limit. */
+export interface UsageWindow {
+  id: string;
+  label: string;
+  /** 0–100. */
+  pct: number;
+  resets_at: string | null;
+}
+
+/** Plan limits as the agent's CLI last reported them. */
+export interface AgentUsage {
+  windows: UsageWindow[];
+  status?: string;
+  /** When the CLI reported this. */
+  at: string;
 }
 
 export interface Chat {

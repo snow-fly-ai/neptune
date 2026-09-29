@@ -11,6 +11,8 @@ export interface BridgeConfig {
   model: string;
   codexPath: string;
   codexModel: string;
+  /** Agents paused on this PC: they stay online but leave their queue alone. */
+  pausedAgents: string[];
 }
 
 export const emptyConfig = (): BridgeConfig => ({
@@ -22,6 +24,7 @@ export const emptyConfig = (): BridgeConfig => ({
   model: '',
   codexPath: '',
   codexModel: '',
+  pausedAgents: [],
 });
 
 export interface HostInfo {
@@ -48,6 +51,8 @@ export interface ProcessArgs {
 export const loadConfig = async () => ({ ...emptyConfig(), ...(await invoke<Partial<BridgeConfig>>('load_config')) });
 export const saveConfig = (config: BridgeConfig) => invoke<void>('save_config', { config });
 export const hostInfo = () => invoke<HostInfo>('host_info');
+/** Latest `rate_limits` Codex logged for a thread, or null. */
+export const codexRateLimits = (threadId: string) => invoke<unknown>('codex_rate_limits', { threadId });
 export const cancelProcess = (runId: string) => invoke<boolean>('cancel_agent', { runId });
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

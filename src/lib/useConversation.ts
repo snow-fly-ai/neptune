@@ -49,7 +49,7 @@ export function useConversation(client: SupabaseClient | null, chatId: string | 
     setLoaded(false);
     refresh();
     const channel = client
-      .channel(`relay-feed-${chatId ?? 'all'}`)
+      .channel(`nebula-feed-${chatId ?? 'all'}`)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'messages', ...(chatId ? { filter: `chat_id=eq.${chatId}` } : {}) },
@@ -111,7 +111,7 @@ export function useChats(client: SupabaseClient | null, onMessage?: (m: Message)
     if (!client) return;
     refresh();
     const channel = client
-      .channel('relay-chats')
+      .channel('nebula-chats')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'chats' }, (p) => {
         if (p.eventType === 'DELETE') dropChat((p.old as Partial<Chat>).id!);
         else putChat(p.new as Chat);
