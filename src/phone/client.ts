@@ -1,11 +1,11 @@
-import { createClient } from '@supabase/supabase-js';
-import { SUPABASE_KEY, SUPABASE_URL } from '../lib/config';
+import { createContext, useContext } from 'react';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
-export const phoneClient = createClient(SUPABASE_URL, SUPABASE_KEY, {
-  auth: {
-    persistSession: true,
-    autoRefreshToken: true,
-    detectSessionInUrl: false,
-    storageKey: 'nebula-auth',
-  },
-});
+/** The signed-in account the phone is showing (see accounts.ts). */
+export const ClientContext = createContext<SupabaseClient | null>(null);
+
+export function useClient(): SupabaseClient {
+  const c = useContext(ClientContext);
+  if (!c) throw new Error('No account client');
+  return c;
+}

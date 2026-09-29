@@ -18,6 +18,7 @@ export interface MessageMeta {
 
 export interface Message {
   id: string;
+  node_id: string;
   chat_id: string;
   sender: Sender;
   body: string;
@@ -28,9 +29,22 @@ export interface Message {
   updated_at: string;
 }
 
-/** One row per agent (claude, codex, …), kept fresh by whatever runs that agent. */
+/** One PC: its bridge signs in with `agent_email`, the phone with `operator_email`. */
+export interface Node {
+  id: string;
+  name: string;
+  operator_email: string;
+  agent_email: string;
+  machine: string | null;
+  created_at: string;
+}
+
+/** One agent (claude, codex, …) on one node, kept fresh by that PC's bridge. */
 export interface Agent {
   id: string;
+  node_id: string;
+  /** Which CLI: `claude`, `codex`, … */
+  kind: string;
   name: string;
   online: boolean;
   activity: string | null;
@@ -63,6 +77,7 @@ export interface AgentUsage {
 
 export interface Chat {
   id: string;
+  node_id: string;
   agent_id: string;
   title: string | null;
   session_id: string | null;

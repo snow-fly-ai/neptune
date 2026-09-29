@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { ONLINE_WINDOW_MS } from './config';
-import type { Agent, Chat, Message } from './types';
+import type { Agent, Chat, Message, Node } from './types';
 
 const PAGE = 200;
 
@@ -82,10 +82,18 @@ export function useConversation(client: SupabaseClient | null, chatId: string | 
   return { messages, loaded, live, upsert, refresh };
 }
 
-/** Live chat list and agent presence, plus every new message (for notifications). */
+/** "Claude", or "Claude · Work" when the account has several PCs. */
+export const agentLabel = (agent: Agent | undefined, nodes: Node[]) => {
+  if (!agent) return 'Agent';
+  const node = nodes.length > 1 ? nodes.find((n) => n.id === agent.node_id) : undefined;
+  return node ? `${agent.name} · ${node.name}` : agent.name;
+};
+
+/** Live chat list, PCs and agent presence, plus every new message (for notifications). */
 export function useChats(client: SupabaseClient | null, onMessage?: (m: Message) => void) {
   const [chats, setChats] = useState<Chat[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [nodes, setNodes] = useState<Node[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [live, setLive] = useState(false);
   const onMessageRef = useRef(onMessage);
@@ -98,12 +106,14 @@ export function useChats(client: SupabaseClient | null, onMessage?: (m: Message)
 
   const refresh = useCallback(async () => {
     if (!client) return;
-    const [c, a] = await Promise.all([
+    const [c, a, n] = await Promise.all([
       client.from('chats').select('*').order('updated_at', { ascending: false }).limit(PAGE),
-      client.from('agents').select('*').order('id'),
+      client.from('agents').select('*').order('name'),
+      client.from('nodes').select('*').order('created_at'),
     ]);
     if (c.data) setChats(c.data as Chat[]);
     if (a.data) setAgents(a.data as Agent[]);
+    if (n.data) setNodes(n.data as Node[]);
     if (!c.error) setLoaded(true);
   }, [client]);
 
@@ -119,8 +129,9 @@ export function useChats(client: SupabaseClient | null, onMessage?: (m: Message)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'agents' }, (p) => {
         if (p.eventType === 'DELETE') return;
         const a = p.new as Agent;
-        setAgents((prev) => [...prev.filter((x) => x.id !== a.id), a].sort((x, y) => x.id.localeCompare(y.id)));
+        setAgents((prev) => [...prev.filter((x) => x.id !== a.id), a].sort((x, y) => x.name.localeCompare(y.name)));
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'nodes' }, () => refresh())
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (p) => {
         onMessageRef.current?.(p.new as Message);
       })
@@ -139,7 +150,7 @@ export function useChats(client: SupabaseClient | null, onMessage?: (m: Message)
     };
   }, [client, refresh, putChat, dropChat]);
 
-  return { chats, agents, loaded, live, refresh, putChat, dropChat };
+  return { chats, agents, nodes, loaded, live, refresh, putChat, dropChat };
 }
 
 /** Re-renders on an interval so relative times and presence stay fresh. */

@@ -366,3 +366,22 @@
 .ag-paused .dot { background: var(--warn); }
 .ag-paused .agent-state { color: var(--warn); }
 .ag-missing { opacity: 0.6; }
+
+/* ---------- packet inspector: fills the space left under node identity ---------- */
+.packet-panel { flex: 1 1 0; min-height: 0; }
+.packet-panel .panel-body { overflow: hidden; }
+.packet-panel .hexstream { flex: 1 1 0; height: 0; min-height: 0; }
+
+/* ---------- QR codes: phone sign-in and pairing ---------- */
+.qr { background: #fff; padding: 6px; box-sizing: border-box; }
+.qr svg { display: block; width: 100%; height: 100%; }
+.auth-qr { display: flex; justify-content: center; margin: 10px 0 4px; }
+.auth-hint { margin: 6px 0 0; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--blue-hi); }
+.auth-alert .auth-code { font-size: 26px; }
+
+.pair-card h1 { margin-top: 12px; }
+.pair-card .lede b { color: var(--text); }
+.pair-qr { display: grid; place-items: center; width: 236px; height: 236px; padding: 8px; border: 1px solid var(--blue-hi); box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.16), 0 0 50px rgba(37, 99, 235, 0.35); }
+.pair-code { margin-top: 16px; font: 700 28px var(--mono); letter-spacing: 0.22em; color: var(--green); text-shadow: 0 0 18px rgba(34, 197, 94, 0.5); }
+.pair-foot { margin-top: 8px; font: 10.5px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+.pair-card .secondary { margin-top: 10px; }

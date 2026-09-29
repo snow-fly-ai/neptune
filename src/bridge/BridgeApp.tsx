@@ -4,15 +4,19 @@ import { check as checkUpdate } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { emptyConfig, hostInfo, loadConfig, saveConfig, type BridgeConfig, type HostInfo } from './native';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { emptyConfig, hostInfo, loadConfig, type HostInfo } from './native';
 import { BridgeEngine, type EngineSnapshot } from './engine';
+import { bridgeClient, ConfigStore, connect, loadNode } from './auth';
+import { Qr } from './Qr';
 import { fmtBytes, fmtUptime, useLatency, useTelemetry, type Telemetry } from './telemetry';
 import { CountdownRing, HexStream, Meter, Panel, Scramble, Spark, Spinner, Typewriter } from './widgets';
 import { appVersion } from '../lib/updates';
 import { inTauri } from '../lib/platform';
 import { isOnline, useChats, useConversation, useNow } from '../lib/useConversation';
-import { AGENT_EMAIL, OWNER_EMAIL } from '../lib/config';
-import type { Agent, Chat, Message } from '../lib/types';
+import { loginQr, pairQr } from '../lib/config';
+import { callFn } from '../lib/fn';
+import type { Agent, Message, Node } from '../lib/types';
 import { MessageList } from '../ui/MessageList';
 import { Composer } from '../ui/Composer';
 import { ActivityBar } from '../ui/ActivityBar';
@@ -24,47 +28,124 @@ import './ops.css';
 const UPDATE_CHECK_MS = 3 * 60 * 60 * 1000;
 const HEARTBEAT_MS = 20_000;
 
+interface Boot {
+  store: ConfigStore;
+  client: SupabaseClient;
+  host: HostInfo;
+  version: string;
+}
+
 export function BridgeApp() {
-  const [boot, setBoot] = useState<{ config: BridgeConfig; host: HostInfo; version: string } | null>(null);
+  const [boot, setBoot] = useState<Boot | null>(null);
+  const [node, setNode] = useState<Node | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
+  const [waiting, setWaiting] = useState<string | null>(null);
 
   useEffect(() => {
-    // `npm run dev` + ?mode=bridge: render the console without a native side or real key.
+    // `npm run dev` + ?mode=bridge: render the console without a native side or a session (&pair: the pairing screen).
     if (!inTauri()) {
-      const config = { ...emptyConfig(), serviceKey: 'preview' };
-      return setBoot({ config, host: { machine: 'PREVIEW', home: '', claudePath: null, codexPath: null }, version: 'dev' });
+      const store = new ConfigStore(emptyConfig());
+      setBoot({ store, client: bridgeClient(store), host: { machine: 'PREVIEW', home: '', claudePath: null, codexPath: null }, version: 'dev' });
+      const pairing = new URLSearchParams(location.search).has('pair');
+      setNode(pairing ? null : { id: '00000000-0000-0000-0000-000000000000', name: 'Preview', operator_email: 'operator@example.com', agent_email: 'agent@example.com', machine: 'PREVIEW', created_at: '' });
+      return;
     }
-    Promise.all([loadConfig(), hostInfo(), appVersion()])
-      .then(([config, host, version]) => setBoot({ config, host, version }))
-      .catch((e) => setError(String(e)));
+    (async () => {
+      const [config, host, version] = await Promise.all([loadConfig(), hostInfo(), appVersion()]);
+      const store = new ConfigStore(config);
+      const client = bridgeClient(store);
+      setBoot({ store, client, host, version });
+      setNode(await connect(store, client, host, setWaiting));
+    })().catch((e) => setError(String(e)));
   }, []);
 
   if (error) return <div className="bridge-setup"><p className="error-text">{error}</p></div>;
-  if (!boot) return <div className="splash" />;
-  if (!boot.config.serviceKey) return <Setup boot={boot} onDone={(config) => setBoot({ ...boot, config })} />;
-  return <Console {...boot} />;
+  if (!boot || node === undefined)
+    return (
+      <div className="bridge-setup">
+        {waiting && (
+          <div className="pair-foot">
+            <Spinner size={16} /> Connecting to Nebula… ({waiting})
+          </div>
+        )}
+      </div>
+    );
+  if (!node) return <Pairing boot={boot} onPaired={setNode} />;
+  return <Console key={node.id} {...boot} node={node} onUnpaired={() => setNode(null)} />;
 }
 
-function Setup({ boot, onDone }: { boot: { config: BridgeConfig; host: HostInfo }; onDone: (c: BridgeConfig) => void }) {
-  const [key, setKey] = useState('');
+type PairState = { id: string; code: string; secret: string; expires_at: string };
+
+/** First run (or after being removed): show a pairing QR for a signed-in phone to scan. */
+function Pairing({ boot, onPaired }: { boot: Boot; onPaired: (node: Node) => void }) {
+  const { client, host } = boot;
+  const [req, setReq] = useState<PairState | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [signingIn, setSigningIn] = useState(false);
+  const [round, setRound] = useState(0);
+  const now = useNow(1000);
+
+  useEffect(() => {
+    let alive = true;
+    let timer = 0;
+    setReq(null);
+    setError(null);
+    (async () => {
+      await client.auth.signOut({ scope: 'local' }).catch(() => {});
+      const r: PairState = await callFn(client, 'pair', { action: 'start', machine: host.machine });
+      if (!alive) return;
+      setReq(r);
+      const poll = async () => {
+        if (!alive) return;
+        try {
+          const s = await callFn(client, 'pair', { action: 'status', id: r.id, secret: r.secret });
+          if (s.state === 'approved') {
+            setSigningIn(true);
+            const { error } = await client.auth.verifyOtp({ email: s.email, token: s.code, type: 'email' });
+            if (error) throw new Error(error.message);
+            const node = await loadNode(client);
+            if (!node) throw new Error('Signed in, but no PC is paired to this agent email');
+            return onPaired(node);
+          }
+          if (s.state === 'expired') return setRound((n) => n + 1);
+        } catch (e) {
+          setSigningIn(false);
+          return setError(String(e instanceof Error ? e.message : e));
+        }
+        timer = window.setTimeout(poll, 2000);
+      };
+      timer = window.setTimeout(poll, 2000);
+    })().catch((e) => alive && setError(String(e instanceof Error ? e.message : e)));
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, [client, host.machine, onPaired, round]);
+
+  const left = req ? Math.max(0, Math.round((Date.parse(req.expires_at) - now) / 1000)) : 0;
   return (
     <div className="bridge-setup">
-      <div className="auth-card">
-        <Reticle size={170} detail="lite" />
-        <h1>NEBULA BRIDGE</h1>
-        <p className="lede">This PC runs your coding agents (Claude, Codex) for your phone. Paste the bridge key to connect it to the Nebula backend.</p>
-        <input className="plain-input" placeholder="Bridge key" value={key} onChange={(e) => setKey(e.target.value)} />
-        <button
-          className="primary"
-          disabled={key.trim().length < 20}
-          onClick={async () => {
-            const config = { ...boot.config, serviceKey: key.trim() };
-            await saveConfig(config);
-            onDone(config);
-          }}
-        >
-          Connect
-        </button>
+      <div className="auth-card pair-card">
+        <Logo size={40} />
+        <h1>PAIR THIS PC</h1>
+        <p className="lede">
+          On your phone, open Nebula, tap <b>⋮ › Pair a PC</b> and scan this code. You choose this PC's operator and agent emails there.
+        </p>
+        <div className="pair-qr">{req ? <Qr text={pairQr(req.code)} size={220} /> : <Spinner size={28} />}</div>
+        {req && (
+          <div className="pair-code">
+            {req.code.slice(0, 4)}-{req.code.slice(4)}
+          </div>
+        )}
+        <div className="pair-foot">
+          {signingIn ? 'Paired · signing in…' : req ? `${host.machine} · new code in ${Math.floor(left / 60)}:${two(left % 60)}` : 'Requesting a pairing code…'}
+        </div>
+        {error && (
+          <>
+            <p className="error-text">{error}</p>
+            <button className="secondary" onClick={() => setRound((n) => n + 1)}>Try again</button>
+          </>
+        )}
       </div>
     </div>
   );
@@ -97,11 +178,13 @@ function useSize<T extends HTMLElement>() {
   return [ref, size] as const;
 }
 
-function Console({ config, host, version }: { config: BridgeConfig; host: HostInfo; version: string }) {
-  const engine = useMemo(() => new BridgeEngine(config, host, version), [config, host, version]);
+function Console({ store, client, node, host, version, onUnpaired }: Boot & { node: Node; onUnpaired: () => void }) {
+  const engine = useMemo(() => new BridgeEngine(store, client, node, host, version), [store, client, node, host, version]);
+  engine.onUnpaired = onUnpaired;
   const snap = useSyncExternalStore(engine.subscribe, engine.getSnapshot);
   const { messages, live } = useConversation(engine.client, null);
   const { agents, chats } = useChats(engine.client);
+  const kindOf = (chatId: string | null | undefined) => agents.find((a) => a.id === chats.find((c) => c.id === chatId)?.agent_id)?.kind ?? null;
   const presence = agents.some((a) => isOnline(a, Date.now()));
   const workers = Object.values(snap.workers);
   const now = useNow(1000);
@@ -239,21 +322,25 @@ function Console({ config, host, version }: { config: BridgeConfig; host: HostIn
           <SystemPanel tele={tele} />
           <NetPanel tele={tele} />
           <Panel n="03" title="Node identity">
+            <KV k="NODE" v={node.name.toUpperCase()} g />
             <KV k="HOST" v={host.machine} />
             <KV k="OS" v={tele.cur?.os || '—'} />
             <KV k="UPTIME" v={tele.cur ? fmtUptime(tele.cur.uptime) : '—'} g />
-            <KV k="AGENT" v={mask(AGENT_EMAIL)} />
-            <KV k="OPERATOR" v={mask(OWNER_EMAIL)} />
+            <KV k="AGENT" v={mask(node.agent_email)} />
+            <KV k="OPERATOR" v={mask(node.operator_email)} />
             <KV k="CLEARANCE" v={permLabel(snap.config.permissionMode)} g />
             <KV k="CHATS" v={String(chats.length)} />
             <KV k="BUILD" v={`v${version}`} />
           </Panel>
+          <Panel n="04" title="Packet inspector" tone="green" right={<span className="dim">{fmtBytes((tele.cur?.rx ?? 0) + (tele.cur?.tx ?? 0), true)}</span>} className="grow packet-panel">
+            <HexStream rate={Math.min(1, ((tele.cur?.rx ?? 0) + (tele.cur?.tx ?? 0)) / (512 * 1024))} />
+          </Panel>
         </div>
 
         <div className="ops-center">
-          <Stage snap={snap} chats={chats} state={state} latency={latency[latency.length - 1]} host={host} onStop={() => engine.stopCurrent(snap.currentAgent ?? undefined)} onDismissCode={() => engine.dismissLoginCode()} now={now} />
+          <Stage snap={snap} kindOf={kindOf} node={node} state={state} latency={latency[latency.length - 1]} host={host} onStop={() => engine.stopCurrent(snap.currentAgent ?? undefined)} onDismissCode={() => engine.dismissLoginCode()} now={now} />
           <Panel n="05" title="Transmission feed" right={<button className="link" onClick={() => setModal('transmit')}>Open channel ›</button>} className="feed-panel">
-            <Feed messages={messages} chats={chats} />
+            <Feed messages={messages} kindOf={kindOf} />
           </Panel>
         </div>
 
@@ -264,10 +351,7 @@ function Console({ config, host, version }: { config: BridgeConfig; host: HostIn
           <Panel n="07" title="Event log" tone="green" right={<Spinner size={13} />} className="grow">
             <EventLog log={snap.log} />
           </Panel>
-          <Panel n="08" title="Packet inspector" tone="green" right={<span className="dim">{fmtBytes((tele.cur?.rx ?? 0) + (tele.cur?.tx ?? 0), true)}</span>}>
-            <HexStream rate={Math.min(1, ((tele.cur?.rx ?? 0) + (tele.cur?.tx ?? 0)) / (512 * 1024))} />
-          </Panel>
-          <Panel n="09" title="Link & mission" right={<CountdownRing period={HEARTBEAT_MS} />}>
+          <Panel n="08" title="Link & mission" right={<CountdownRing period={HEARTBEAT_MS} />}>
             <div className="lat-row">
               <div>
                 <span className="k">LATENCY</span>
@@ -293,7 +377,7 @@ function Console({ config, host, version }: { config: BridgeConfig; host: HostIn
       {modal === 'transmit' && (
         <Modal title="Secure channel · mobile uplink" onClose={() => setModal(null)} wide>
           <div className="transmit">
-            <MessageList messages={messages} self="agent" agentName={(m) => agentLabel(m, chats)} empty={<div className="empty"><p>No transmissions yet. Anything sent from the phone shows up here.</p></div>} />
+            <MessageList messages={messages} self="agent" agentName={(m) => agentLabel(m, kindOf)} empty={<div className="empty"><p>No transmissions yet. Anything sent from the phone shows up here.</p></div>} />
             <ActivityBar activity={snap.activity} working={working} since={snap.current?.updated_at} onStop={() => engine.stopCurrent()} />
             <Composer placeholder="Send a note to the phone (latest chat)" onSend={(t) => engine.sendNote(t)} enterSends />
           </div>
@@ -301,7 +385,21 @@ function Console({ config, host, version }: { config: BridgeConfig; host: HostIn
       )}
       {modal === 'config' && (
         <Modal title="Bridge configuration" onClose={() => setModal(null)}>
-          <ConfigForm engine={engine} snap={snap} host={host} autostart={autostart} setAutostart={setAutostart} awake={awake} setAwake={setAwake} updateState={updateState} />
+          <ConfigForm
+            engine={engine}
+            snap={snap}
+            host={host}
+            autostart={autostart}
+            setAutostart={setAutostart}
+            awake={awake}
+            setAwake={setAwake}
+            updateState={updateState}
+            onUnpair={async () => {
+              await engine.stop();
+              await client.auth.signOut({ scope: 'local' }).catch(() => {});
+              onUnpaired();
+            }}
+          />
         </Modal>
       )}
     </div>
@@ -325,7 +423,7 @@ function AgentsPanel({
   return (
     <div className="agents">
       {workers.map((w) => {
-        const row = agents.find((a) => a.id === w.id);
+        const row = agents.find((a) => a.kind === w.id);
         const online = isOnline(row, now);
         const state = !w.binary ? 'missing' : !running ? 'off' : w.current ? 'busy' : w.paused ? 'paused' : online ? 'ready' : 'off';
         const label = { missing: 'NOT INSTALLED', off: running ? 'CONNECTING' : 'BRIDGE PAUSED', busy: 'EXECUTING', paused: 'PAUSED', ready: 'ONLINE' }[state];
@@ -469,7 +567,8 @@ function NetPanel({ tele }: { tele: Telemetry }) {
 
 function Stage({
   snap,
-  chats,
+  kindOf,
+  node,
   state,
   latency,
   host,
@@ -478,7 +577,8 @@ function Stage({
   onDismissCode,
 }: {
   snap: EngineSnapshot;
-  chats: Chat[];
+  kindOf: (chatId: string | null | undefined) => string | null;
+  node: Node;
   state: 'idle' | 'busy' | 'offline';
   latency?: number;
   host: HostInfo;
@@ -498,8 +598,8 @@ function Stage({
     <div className="stage" ref={ref}>
       <div className="hud-corner tl">
         <span>TARGET</span>
-        <b>OPERATOR // {host.machine}</b>
-        <span>ID 0x{hexId(OWNER_EMAIL.split('').map((c) => c.charCodeAt(0).toString(16)).join(''), 6)}</span>
+        <b>{node.name.toUpperCase()} // {host.machine}</b>
+        <span>ID 0x{hexId(node.id, 6)}</span>
       </div>
       <div className="hud-corner tr">
         <span>SIGNAL</span>
@@ -508,7 +608,7 @@ function Stage({
       </div>
       <div className="hud-corner bl">
         <span>CHANNEL</span>
-        <b>{cur ? `${agentName(chats.find((c) => c.id === cur.chat_id)?.agent_id)} // ${hexId(cur.chat_id, 8)}` : `${Object.values(snap.workers).filter((w) => w.binary).length} AGENTS ARMED`}</b>
+        <b>{cur ? `${agentName(kindOf(cur.chat_id))} // ${hexId(cur.chat_id, 8)}` :`${Object.values(snap.workers).filter((w) => w.binary).length} AGENTS ARMED`}</b>
       </div>
       <div className="hud-corner br">
         <span>MODE</span>
@@ -541,6 +641,10 @@ function Stage({
       {code && (
         <div className="auth-alert">
           <span className="tag">⚠ Access request · {mask(code.email)}</span>
+          <div className="auth-qr">
+            <Qr text={loginQr(code.email, code.code)} size={196} />
+          </div>
+          <p className="auth-hint">Scan with Nebula on your phone · or type</p>
           <div className="auth-code">{code.code.split('').join(' ')}</div>
           <div className="auth-foot">
             <span>EXPIRES {stamp(new Date(code.expires_at))}</span>
@@ -553,12 +657,12 @@ function Stage({
 }
 
 const agentName = (id: string | null | undefined) => (id ? id.toUpperCase() : '—');
-const agentLabel = (m: Message, chats: Chat[]) => {
-  const id = m.meta?.agent ?? chats.find((c) => c.id === m.chat_id)?.agent_id;
+const agentLabel = (m: Message, kindOf: (chatId: string) => string | null) => {
+  const id = m.meta?.agent ?? kindOf(m.chat_id);
   return id ? id.charAt(0).toUpperCase() + id.slice(1) : 'Agent';
 };
 
-function Feed({ messages, chats }: { messages: Message[]; chats: Chat[] }) {
+function Feed({ messages, kindOf }: { messages: Message[]; kindOf: (chatId: string) => string | null }) {
   const rows = messages.filter((m) => m.body.trim() !== '/stop').slice(-9);
   if (!rows.length) return <div className="feed-empty"><Spinner size={14} tone="blue" /> Listening for transmissions…</div>;
   return (
@@ -567,7 +671,7 @@ function Feed({ messages, chats }: { messages: Message[]; chats: Chat[] }) {
         <div key={m.id} className={`feed-row f-${m.sender}`}>
           <span className="t">{stamp(new Date(m.created_at))}</span>
           <span className="dir">{m.sender === 'user' ? '▲ IN ' : m.sender === 'agent' ? '◆ OUT' : '■ SYS'}</span>
-          <span className="ag">{agentName(chats.find((c) => c.id === m.chat_id)?.agent_id).slice(0, 6)}</span>
+          <span className="ag">{agentName(kindOf(m.chat_id)).slice(0, 6)}</span>
           <span className="id">#{hexId(m.id, 6)}</span>
           <span className="txt">{firstLine(m.body)}</span>
           {m.sender === 'user' && <span className={`st st-${m.status}`}>{m.status === 'processing' ? 'EXEC' : m.status.toUpperCase()}</span>}
@@ -648,6 +752,7 @@ function ConfigForm({
   awake,
   setAwake,
   updateState,
+  onUnpair,
 }: {
   engine: BridgeEngine;
   snap: EngineSnapshot;
@@ -657,8 +762,10 @@ function ConfigForm({
   awake: boolean;
   setAwake: (v: boolean) => void;
   updateState: string;
+  onUnpair: () => void;
 }) {
   const c = snap.config;
+  const [confirmUnpair, setConfirmUnpair] = useState(false);
   return (
     <div className="config">
       <button className="secondary" onClick={() => (snap.running ? engine.stop() : engine.start())}>
@@ -723,6 +830,12 @@ function ConfigForm({
       <div className="setting inline">
         <span>Full screen</span>
         <code>F11</code>
+      </div>
+      <div className="setting inline">
+        <span>Paired as {engine.node.name}</span>
+        <button className={`mini ${confirmUnpair ? 'danger' : ''}`} onClick={() => (confirmUnpair ? onUnpair() : setConfirmUnpair(true))}>
+          {confirmUnpair ? 'Sign out + re-pair?' : 'Re-pair this PC'}
+        </button>
       </div>
       <div className="update-line">{updateState}</div>
     </div>

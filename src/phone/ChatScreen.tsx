@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { phoneClient } from './client';
-import { isOnline, useConversation, useNow } from '../lib/useConversation';
-import type { Agent, Chat, Message } from '../lib/types';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { useClient } from './client';
+import { agentLabel, isOnline, useConversation, useNow } from '../lib/useConversation';
+import type { Agent, Chat, Message, Node } from '../lib/types';
 import { MessageList } from '../ui/MessageList';
 import { Composer } from '../ui/Composer';
 import { ActivityBar } from '../ui/ActivityBar';
@@ -22,13 +23,13 @@ const uptime = (ms: number) => {
 };
 
 /** Round-trip time to the backend, sampled every 10 seconds. */
-function useLatency() {
+function useLatency(client: SupabaseClient) {
   const [ms, setMs] = useState<number | null>(null);
   useEffect(() => {
     let alive = true;
     const ping = async () => {
       const t = performance.now();
-      const { error } = await phoneClient.from('agents').select('id').limit(1);
+      const { error } = await client.from('agents').select('id').limit(1);
       if (alive) setMs(error ? null : Math.round(performance.now() - t));
     };
     ping();
@@ -37,7 +38,7 @@ function useLatency() {
       alive = false;
       window.clearInterval(id);
     };
-  }, []);
+  }, [client]);
   return ms;
 }
 
@@ -46,12 +47,14 @@ const isHiddenCommand = (m: Message) => m.sender === 'user' && m.body.trim() ===
 export function ChatScreen({
   chat,
   agent,
+  nodes,
   onBack,
   onDeleted,
   onError,
 }: {
   chat: Chat;
   agent: Agent | undefined;
+  nodes: Node[];
   onBack: () => void;
   onDeleted: () => void;
   onError: (text: string) => void;
@@ -60,10 +63,11 @@ export function ChatScreen({
   const [menu, setMenu] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const startedAt = useRef(Date.now());
-  const latency = useLatency();
-  const { messages, live, upsert } = useConversation(phoneClient, chat.id);
+  const client = useClient();
+  const latency = useLatency(client);
+  const { messages, live, upsert } = useConversation(client, chat.id);
 
-  const name = agent?.name ?? chat.agent_id;
+  const name = agentLabel(agent, nodes);
   const visible = useMemo(() => messages.filter((m) => !isHiddenCommand(m)), [messages]);
   const online = isOnline(agent, now);
   const current = messages.find((m) => m.sender === 'user' && m.status === 'processing');
@@ -72,7 +76,7 @@ export function ChatScreen({
   const activity = agent?.current_chat_id === chat.id ? agent.activity : null;
 
   const send = async (body: string) => {
-    const { data, error } = await phoneClient
+    const { data, error } = await client
       .from('messages')
       .insert({ chat_id: chat.id, sender: 'user', body, status: 'queued' })
       .select()
@@ -85,12 +89,12 @@ export function ChatScreen({
   };
 
   const cancel = async (m: Message) => {
-    const { error } = await phoneClient.from('messages').update({ status: 'cancelled' }).eq('id', m.id).eq('status', 'queued');
+    const { error } = await client.from('messages').update({ status: 'cancelled' }).eq('id', m.id).eq('status', 'queued');
     if (error) onError(error.message);
   };
 
   const remove = async () => {
-    const { error } = await phoneClient.from('chats').delete().eq('id', chat.id);
+    const { error } = await client.from('chats').delete().eq('id', chat.id);
     if (error) return onError(error.message);
     onDeleted();
   };

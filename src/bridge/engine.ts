@@ -1,9 +1,9 @@
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { notify } from '../lib/notify';
-import { SUPABASE_URL } from '../lib/config';
-import type { AgentUsage, Message } from '../lib/types';
+import type { AgentUsage, Message, Node } from '../lib/types';
 import { ADAPTERS, type AgentAdapter, type TaskOutcome } from './agents';
-import { cancelProcess, hostInfo, saveConfig, type BridgeConfig, type HostInfo } from './native';
+import type { ConfigStore } from './auth';
+import { cancelProcess, hostInfo, type BridgeConfig, type HostInfo } from './native';
 import { inTauri } from '../lib/platform';
 
 export interface LogEntry {
@@ -14,7 +14,9 @@ export interface LogEntry {
   agent?: string;
 }
 
+/** A phone asked to sign in as this node's operator; shown as a QR code. */
 export interface LoginCode {
+  id: string;
   email: string;
   code: string;
   expires_at: string;
@@ -52,8 +54,13 @@ const POLL_MS = 15_000;
 
 export class BridgeEngine {
   readonly client: SupabaseClient;
-  private config: BridgeConfig;
+  readonly node: Node;
+  private store: ConfigStore;
   private host: HostInfo;
+  /** Agent kind (claude, codex) → its row id on this node, known after the first heartbeat. */
+  private agentIds: Record<string, string> = {};
+  /** Called when this PC's node is gone (removed on the phone). */
+  onUnpaired?: () => void;
   private version: string;
   private listeners = new Set<() => void>();
   private timers: number[] = [];
@@ -62,13 +69,13 @@ export class BridgeEngine {
   private pendingActivity: Record<string, number | undefined> = {};
   private snapshot: EngineSnapshot;
 
-  constructor(config: BridgeConfig, host: HostInfo, version: string) {
-    this.config = config;
+  constructor(store: ConfigStore, client: SupabaseClient, node: Node, host: HostInfo, version: string) {
+    this.store = store;
+    this.client = client;
+    this.node = node;
     this.host = host;
     this.version = version;
-    this.client = createClient(SUPABASE_URL, config.serviceKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
+    const config = store.config;
     const workers: Record<string, WorkerState> = {};
     for (const a of ADAPTERS) {
       workers[a.id] = {
@@ -121,9 +128,12 @@ export class BridgeEngine {
     this.set({ log: [...this.snapshot.log.slice(-299), entry] });
   }
 
+  private get config() {
+    return this.store.config;
+  }
+
   async updateConfig(patch: Partial<BridgeConfig>) {
-    this.config = { ...this.config, ...patch };
-    await saveConfig(this.config);
+    await this.store.patch(patch);
     this.set({ config: this.config });
     this.refreshBinaries();
   }
@@ -155,8 +165,8 @@ export class BridgeEngine {
     if (this.snapshot.running) return;
     this.set({ running: true });
     const found = this.adapters().map((a) => a.name);
-    this.log('info', `Bridge started on ${this.host.machine} · agents: ${found.length ? found.join(', ') : 'none found'}`);
-    await this.migrateLegacySession();
+    this.log('info', `Bridge started on ${this.host.machine} as ${this.node.name} · agents: ${found.length ? found.join(', ') : 'none found'}`);
+    await this.heartbeat();
     for (const a of this.adapters()) await this.recoverInterrupted(a);
 
     this.client
@@ -166,7 +176,7 @@ export class BridgeEngine {
         if (m.body.trim() === '/stop') this.stopChat(m);
         else this.kickAll();
       })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'login_codes' }, (p) => {
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'login_requests', filter: `node_id=eq.${this.node.id}` }, (p) => {
         this.showLoginCode(p.new as LoginCode);
       })
       .subscribe((status) => {
@@ -174,7 +184,6 @@ export class BridgeEngine {
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') this.log('error', `Realtime ${status.toLowerCase()}; polling instead`);
       });
 
-    this.heartbeat();
     this.timers.push(window.setInterval(() => this.heartbeat(), HEARTBEAT_MS));
     this.timers.push(window.setInterval(() => this.kickAll(), POLL_MS));
     window.addEventListener('beforeunload', this.goOffline);
@@ -190,28 +199,12 @@ export class BridgeEngine {
     this.log('info', 'Bridge paused');
   }
 
-  /** Before chats existed there was one Claude session in bridge.json; hand it to the first Claude chat. */
-  private async migrateLegacySession() {
-    const sid = this.config.sessionId;
-    if (!sid) return;
-    const { data } = await this.client
-      .from('chats')
-      .select('id')
-      .eq('agent_id', 'claude')
-      .is('session_id', null)
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    if (data) await this.client.from('chats').update({ session_id: sid }).eq('id', data.id);
-    await this.updateConfig({ sessionId: '' });
-  }
-
-  /** Phone sign-in codes are shown here (and as a Windows notification) rather than emailed. */
+  /** Phone sign-in codes are shown here as a QR code (and a Windows notification) rather than emailed. */
   private showLoginCode(c: LoginCode) {
     if (Date.parse(c.expires_at) < Date.now()) return;
     this.set({ loginCode: c });
-    this.log('info', `Sign-in code requested for ${c.email}`);
-    notify('Nebula sign-in code', `${c.code} for ${c.email}`);
+    this.log('info', `Phone sign-in requested for ${c.email}`);
+    notify('Nebula sign-in', `Scan the QR code on this PC to sign in ${c.email}`);
   }
 
   /** A line in the console's event log. */
@@ -233,21 +226,22 @@ export class BridgeEngine {
     else list.delete(agent);
     await this.updateConfig({ pausedAgents: [...list] });
     this.log('info', paused ? 'Paused · new messages wait in its queue' : 'Resumed', agent);
-    if (this.snapshot.running) {
-      await this.client.from('agents').update({ paused }).eq('id', agent);
+    if (this.snapshot.running && this.agentIds[agent]) {
+      await this.client.from('agents').update({ paused }).eq('id', this.agentIds[agent]);
       if (!paused) this.kick(ADAPTERS.find((a) => a.id === agent)!);
     }
   }
 
   private async saveUsage(agent: string, usage: AgentUsage) {
     this.setWorker(agent, { usage });
-    const { error } = await this.client.from('agents').update({ usage }).eq('id', agent);
+    const id = this.agentIds[agent];
+    if (!id) return;
+    const { error } = await this.client.from('agents').update({ usage }).eq('id', id);
     if (error) this.log('error', `Could not save usage: ${error.message}`, agent);
   }
 
   private goOffline = async () => {
-    const ids = ADAPTERS.map((a) => a.id);
-    await this.client.from('agents').update({ online: false, paused: false, activity: null, current_chat_id: null }).in('id', ids);
+    await this.client.from('agents').update({ online: false, paused: false, activity: null, current_chat_id: null }).eq('node_id', this.node.id);
   };
 
   private async heartbeat() {
@@ -255,7 +249,8 @@ export class BridgeEngine {
     const rows = this.adapters().map((a) => {
       const w = this.snapshot.workers[a.id];
       return {
-        id: a.id,
+        node_id: this.node.id,
+        kind: a.id,
         name: a.name,
         online: true,
         paused: w.paused,
@@ -267,20 +262,32 @@ export class BridgeEngine {
       };
     });
     if (!rows.length) return;
-    const { error } = await this.client.from('agents').upsert(rows);
-    if (error) this.log('error', `Heartbeat failed: ${error.message}`);
+    const { data, error } = await this.client.from('agents').upsert(rows, { onConflict: 'node_id,kind' }).select('id, kind');
+    if (error) {
+      this.log('error', `Heartbeat failed: ${error.message}`);
+      // Removed from the phone, or signed out: stop and go back to pairing.
+      const { data: still, error: lookupError } = await this.client.from('nodes').select('id').eq('id', this.node.id).maybeSingle();
+      if (!lookupError && !still && this.snapshot.running) {
+        await this.stop();
+        this.onUnpaired?.();
+      }
+      return;
+    }
+    for (const r of data ?? []) this.agentIds[r.kind] = r.id;
   }
 
   private setActivity(agent: string, text: string | null, force = false) {
     this.setWorker(agent, { activity: text });
     const push = () => {
       const w = this.snapshot.workers[agent];
+      const id = this.agentIds[agent];
+      if (!id) return;
       this.lastActivityPush[agent] = Date.now();
       this.pendingActivity[agent] = undefined;
       this.client
         .from('agents')
         .update({ activity: w.activity, current_chat_id: w.busy ? (w.current?.chat_id ?? null) : null, last_seen: new Date().toISOString() })
-        .eq('id', agent)
+        .eq('id', id)
         .then();
     };
     const wait = 1200 - (Date.now() - (this.lastActivityPush[agent] ?? 0));
@@ -294,12 +301,13 @@ export class BridgeEngine {
 
   /** A task left "processing" means the bridge died mid-run; don't silently re-run it. */
   private async recoverInterrupted(a: AgentAdapter) {
+    if (!this.agentIds[a.id]) return;
     const { data } = await this.client
       .from('messages')
       .select('id, chat_id, chats!inner(agent_id)')
       .eq('sender', 'user')
       .eq('status', 'processing')
-      .eq('chats.agent_id', a.id);
+      .eq('chats.agent_id', this.agentIds[a.id]);
     for (const m of (data ?? []) as { id: string; chat_id: string }[]) {
       await this.client.from('messages').update({ status: 'error' }).eq('id', m.id);
       await this.reply(m.chat_id, m.id, 'That task was interrupted because the Nebula bridge restarted. Send it again if you still need it.', 'system');
@@ -308,7 +316,9 @@ export class BridgeEngine {
 
   // ---- queue -------------------------------------------------------------------------
   private async claimNext(agent: string): Promise<Message | null> {
-    const { data, error } = await this.client.rpc('claim_next_message', { p_agent: agent }).maybeSingle();
+    const id = this.agentIds[agent];
+    if (!id) return null;
+    const { data, error } = await this.client.rpc('claim_next_message', { p_agent: id }).maybeSingle();
     if (error) throw new Error(error.message);
     return (data as Message | null) ?? null;
   }

@@ -23,7 +23,10 @@ pub struct Runs(Mutex<HashMap<String, Arc<Notify>>>);
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct BridgeConfig {
+    /// Legacy (≤ 0.4): the bridge used the service key. Swapped for an agent sign-in on upgrade.
     pub service_key: String,
+    /// The bridge's own Supabase Auth session (agent email), keyed like browser storage.
+    pub auth: HashMap<String, String>,
     pub workspace: String,
     pub permission_mode: String,
     pub claude_path: String,
@@ -38,7 +41,11 @@ pub struct BridgeConfig {
 
 /// `~/.nebula/bridge.json`. Kept out of AppData so tools running inside
 /// packaged (MSIX) apps, like the Claude desktop app, see the same file.
+/// `NEBULA_CONFIG_DIR` points a second bridge at another config, e.g. to test pairing on one PC.
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(dir) = std::env::var_os("NEBULA_CONFIG_DIR") {
+        return Ok(PathBuf::from(dir).join("bridge.json"));
+    }
     let home = app.path().home_dir().map_err(|e| e.to_string())?;
     Ok(home.join(".nebula").join("bridge.json"))
 }

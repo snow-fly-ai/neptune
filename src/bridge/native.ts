@@ -2,7 +2,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
 export interface BridgeConfig {
+  /** Legacy (≤ 0.4): swapped for an agent sign-in on upgrade, then cleared. */
   serviceKey: string;
+  /** This PC's Supabase Auth session (its node's agent email). */
+  auth: Record<string, string>;
   workspace: string;
   permissionMode: string;
   claudePath: string;
@@ -17,6 +20,7 @@ export interface BridgeConfig {
 
 export const emptyConfig = (): BridgeConfig => ({
   serviceKey: '',
+  auth: {},
   workspace: '',
   permissionMode: '',
   claudePath: '',

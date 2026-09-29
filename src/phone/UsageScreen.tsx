@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { phoneClient } from './client';
-import { isOnline, useNow } from '../lib/useConversation';
-import type { Agent, Chat, MessageMeta } from '../lib/types';
+import { useClient } from './client';
+import { agentLabel, isOnline, useNow } from '../lib/useConversation';
+import type { Agent, Chat, MessageMeta, Node } from '../lib/types';
 import { BackIcon } from '../ui/icons';
 import { ago } from '../ui/time';
 
@@ -44,14 +44,15 @@ const until = (iso: string | null, now: number) => {
 };
 
 /** Per-agent plan limits (as the CLI last reported them) and token/cost totals from Nebula's own runs. */
-export function UsageScreen({ agents, chats, onBack }: { agents: Agent[]; chats: Chat[]; onBack: () => void }) {
+export function UsageScreen({ agents, nodes, chats, onBack }: { agents: Agent[]; nodes: Node[]; chats: Chat[]; onBack: () => void }) {
+  const client = useClient();
   const now = useNow(30_000);
   const [period, setPeriod] = useState<Period>('7d');
   const [replies, setReplies] = useState<Reply[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    phoneClient
+    client
       .from('messages')
       .select('created_at, chat_id, meta')
       .eq('sender', 'agent')
@@ -62,11 +63,11 @@ export function UsageScreen({ agents, chats, onBack }: { agents: Agent[]; chats:
         if (error) setError(error.message);
         else setReplies((data ?? []) as Reply[]);
       });
-  }, []);
+  }, [client]);
 
   const agentOf = useMemo(() => {
     const byChat = Object.fromEntries(chats.map((c) => [c.id, c.agent_id]));
-    return (r: Reply) => r.meta?.agent ?? byChat[r.chat_id];
+    return (r: Reply) => byChat[r.chat_id];
   }, [chats]);
 
   const totals = useMemo(() => {
@@ -121,8 +122,8 @@ export function UsageScreen({ agents, chats, onBack }: { agents: Agent[]; chats:
           return (
             <section key={a.id} className="usage-card">
               <div className="usage-head">
-                <span className={`agent-badge a-${a.id}`}>{a.name.slice(0, 2).toUpperCase()}</span>
-                <b>{a.name}</b>
+                <span className={`agent-badge a-${a.kind}`}>{a.name.slice(0, 2).toUpperCase()}</span>
+                <b>{agentLabel(a, nodes)}</b>
                 <span className={`usage-state ${a.paused ? 'paused' : online ? 'on' : ''}`}>
                   {online ? (a.paused ? 'Paused' : 'Online') : 'Offline'}
                 </span>
