@@ -4,15 +4,15 @@ import { check as checkUpdate } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { hostInfo, loadConfig, saveConfig, type BridgeConfig, type HostInfo } from './claude';
+import { emptyConfig, hostInfo, loadConfig, saveConfig, type BridgeConfig, type HostInfo } from './native';
 import { BridgeEngine, type EngineSnapshot } from './engine';
 import { fmtBytes, fmtUptime, useLatency, useTelemetry, type Telemetry } from './telemetry';
 import { CountdownRing, HexStream, Meter, Panel, Scramble, Spark, Spinner, Typewriter } from './widgets';
 import { appVersion } from '../lib/updates';
 import { inTauri } from '../lib/platform';
-import { useConversation, useNow } from '../lib/useConversation';
+import { isOnline, useChats, useConversation, useNow } from '../lib/useConversation';
 import { AGENT_EMAIL, OWNER_EMAIL } from '../lib/config';
-import type { AgentState, Message } from '../lib/types';
+import type { Chat, Message } from '../lib/types';
 import { MessageList } from '../ui/MessageList';
 import { Composer } from '../ui/Composer';
 import { ActivityBar } from '../ui/ActivityBar';
@@ -31,8 +31,8 @@ export function BridgeApp() {
   useEffect(() => {
     // `npm run dev` + ?mode=bridge: render the console without a native side or real key.
     if (!inTauri()) {
-      const config = { serviceKey: 'preview', workspace: '', permissionMode: '', claudePath: '', sessionId: '', model: '' };
-      return setBoot({ config, host: { machine: 'PREVIEW', home: '', claudePath: null }, version: 'dev' });
+      const config = { ...emptyConfig(), serviceKey: 'preview' };
+      return setBoot({ config, host: { machine: 'PREVIEW', home: '', claudePath: null, codexPath: null }, version: 'dev' });
     }
     Promise.all([loadConfig(), hostInfo(), appVersion()])
       .then(([config, host, version]) => setBoot({ config, host, version }))
@@ -52,7 +52,7 @@ function Setup({ boot, onDone }: { boot: { config: BridgeConfig; host: HostInfo 
       <div className="auth-card">
         <Reticle size={170} detail="lite" />
         <h1>RELAY BRIDGE</h1>
-        <p className="lede">This PC runs Claude for your phone. Paste the bridge key to connect it to the Relay backend.</p>
+        <p className="lede">This PC runs your coding agents (Claude, Codex) for your phone. Paste the bridge key to connect it to the Relay backend.</p>
         <input className="plain-input" placeholder="Bridge key" value={key} onChange={(e) => setKey(e.target.value)} />
         <button
           className="primary"
@@ -100,7 +100,10 @@ function useSize<T extends HTMLElement>() {
 function Console({ config, host, version }: { config: BridgeConfig; host: HostInfo; version: string }) {
   const engine = useMemo(() => new BridgeEngine(config, host, version), [config, host, version]);
   const snap = useSyncExternalStore(engine.subscribe, engine.getSnapshot);
-  const { messages, agent, live } = useConversation(engine.client);
+  const { messages, live } = useConversation(engine.client, null);
+  const { agents, chats } = useChats(engine.client);
+  const presence = agents.some((a) => isOnline(a, Date.now()));
+  const workers = Object.values(snap.workers);
   const now = useNow(1000);
   const tele = useTelemetry();
   const latency = useLatency(engine.client);
@@ -192,7 +195,7 @@ function Console({ config, host, version }: { config: BridgeConfig; host: HostIn
         <div className="ops-chips">
           <Chip on={live} label="UPLINK" value={live ? 'LIVE' : 'RETRY'} />
           <Chip on={snap.running} label="BRIDGE" value={snap.running ? 'ARMED' : 'PAUSED'} />
-          <Chip on={!!agent?.online} label="PRESENCE" value={agent?.online ? 'BROADCAST' : 'DARK'} />
+          <Chip on={presence} label="PRESENCE" value={presence ? 'BROADCAST' : 'DARK'} />
           <Chip on label="NODE" value={host.machine} />
         </div>
         <div className="ops-actions">
@@ -226,17 +229,19 @@ function Console({ config, host, version }: { config: BridgeConfig; host: HostIn
             <KV k="UPTIME" v={tele.cur ? fmtUptime(tele.cur.uptime) : '—'} g />
             <KV k="AGENT" v={mask(AGENT_EMAIL)} />
             <KV k="OPERATOR" v={mask(OWNER_EMAIL)} />
-            <KV k="ENGINE" v={`CLAUDE CODE ${snap.config.model ? `· ${snap.config.model.toUpperCase()}` : ''}`} />
+            {workers.map((w) => (
+              <KV key={w.id} k={w.name.toUpperCase()} v={w.binary ? (w.busy ? 'EXECUTING' : 'READY') : 'NOT INSTALLED'} g={!!w.binary} />
+            ))}
             <KV k="CLEARANCE" v={permLabel(snap.config.permissionMode)} g />
-            <KV k="SESSION" v={hexId(snap.config.sessionId)} />
+            <KV k="CHATS" v={String(chats.length)} />
             <KV k="BUILD" v={`v${version}`} />
           </Panel>
         </div>
 
         <div className="ops-center">
-          <Stage snap={snap} agent={agent} state={state} latency={latency[latency.length - 1]} host={host} onStop={() => engine.stopCurrent()} onDismissCode={() => engine.dismissLoginCode()} now={now} />
+          <Stage snap={snap} chats={chats} state={state} latency={latency[latency.length - 1]} host={host} onStop={() => engine.stopCurrent(snap.currentAgent ?? undefined)} onDismissCode={() => engine.dismissLoginCode()} now={now} />
           <Panel n="05" title="Transmission feed" right={<button className="link" onClick={() => setModal('transmit')}>Open channel ›</button>} className="feed-panel">
-            <Feed messages={messages} />
+            <Feed messages={messages} chats={chats} />
           </Panel>
         </div>
 
@@ -273,9 +278,9 @@ function Console({ config, host, version }: { config: BridgeConfig; host: HostIn
       {modal === 'transmit' && (
         <Modal title="Secure channel · mobile uplink" onClose={() => setModal(null)} wide>
           <div className="transmit">
-            <MessageList messages={messages} self="claude" empty={<div className="empty"><p>No transmissions yet. Anything sent from the phone shows up here.</p></div>} />
-            <ActivityBar agent={agent} working={working} since={snap.current?.updated_at} onStop={() => engine.stopCurrent()} />
-            <Composer placeholder="Send a note to the phone as Claude" onSend={(t) => engine.sendAsClaude(t)} enterSends />
+            <MessageList messages={messages} self="agent" agentName={(m) => agentLabel(m, chats)} empty={<div className="empty"><p>No transmissions yet. Anything sent from the phone shows up here.</p></div>} />
+            <ActivityBar activity={snap.activity} working={working} since={snap.current?.updated_at} onStop={() => engine.stopCurrent()} />
+            <Composer placeholder="Send a note to the phone (latest chat)" onSend={(t) => engine.sendNote(t)} enterSends />
           </div>
         </Modal>
       )}
@@ -293,7 +298,7 @@ const permLabel = (p: string) => (p === 'acceptEdits' ? 'EDIT' : p === 'default'
 function missionStats(messages: Message[], now: number) {
   const dayStart = new Date(new Date(now).toDateString()).getTime();
   const tasks = messages.filter((m) => m.sender === 'user' && m.body.trim() !== '/stop');
-  const replies = messages.filter((m) => m.sender === 'claude' && m.meta?.duration_ms);
+  const replies = messages.filter((m) => m.sender === 'agent' && m.meta?.duration_ms);
   const avgMs = replies.length ? replies.reduce((s, m) => s + (m.meta.duration_ms ?? 0), 0) / replies.length : 0;
   const lastMsg = messages[messages.length - 1];
   const since = lastMsg ? Math.round((now - Date.parse(lastMsg.created_at)) / 1000) : null;
@@ -391,7 +396,7 @@ function NetPanel({ tele }: { tele: Telemetry }) {
 
 function Stage({
   snap,
-  agent,
+  chats,
   state,
   latency,
   host,
@@ -400,7 +405,7 @@ function Stage({
   onDismissCode,
 }: {
   snap: EngineSnapshot;
-  agent: AgentState | null;
+  chats: Chat[];
   state: 'idle' | 'busy' | 'offline';
   latency?: number;
   host: HostInfo;
@@ -412,7 +417,7 @@ function Stage({
   const r = Math.max(180, Math.min(size.w - 40, size.h - 150, 620));
   const cur = snap.current;
   const headline = state === 'busy' ? 'EXECUTING DIRECTIVE' : state === 'idle' ? 'STANDBY' : 'BRIDGE PAUSED';
-  const line = state === 'busy' ? snap.activity || agent?.activity || 'Working…' : state === 'idle' ? 'Awaiting directive from mobile uplink' : 'Resume the bridge to accept directives';
+  const line = state === 'busy' ? snap.activity || 'Working…' : state === 'idle' ? 'Awaiting directive from mobile uplink' : 'Resume the bridge to accept directives';
   const elapsed = cur ? fmtUptime((now - Date.parse(cur.updated_at)) / 1000) : null;
   const code = snap.loginCode && Date.parse(snap.loginCode.expires_at) > now ? snap.loginCode : null;
 
@@ -429,8 +434,8 @@ function Stage({
         <span>{latency != null ? `QUALITY ${Math.max(60, 100 - latency / 20).toFixed(1)}%` : '—'}</span>
       </div>
       <div className="hud-corner bl">
-        <span>SESSION</span>
-        <b>{hexId(snap.config.sessionId, 12)}</b>
+        <span>CHANNEL</span>
+        <b>{cur ? `${agentName(chats.find((c) => c.id === cur.chat_id)?.agent_id)} // ${hexId(cur.chat_id, 8)}` : `${Object.values(snap.workers).filter((w) => w.binary).length} AGENTS ARMED`}</b>
       </div>
       <div className="hud-corner br">
         <span>MODE</span>
@@ -452,7 +457,7 @@ function Stage({
         </div>
         {cur && (
           <div className="directive">
-            <span className="tag">DIRECTIVE #{hexId(cur.id, 6)}</span>
+            <span className="tag">{agentName(snap.currentAgent)} · DIRECTIVE #{hexId(cur.id, 6)}</span>
             <p>{firstLine(cur.body, 180)}</p>
             <button className="abort" onClick={onStop}>■ ABORT</button>
           </div>
@@ -474,7 +479,13 @@ function Stage({
   );
 }
 
-function Feed({ messages }: { messages: Message[] }) {
+const agentName = (id: string | null | undefined) => (id ? id.toUpperCase() : '—');
+const agentLabel = (m: Message, chats: Chat[]) => {
+  const id = m.meta?.agent ?? chats.find((c) => c.id === m.chat_id)?.agent_id;
+  return id ? id.charAt(0).toUpperCase() + id.slice(1) : 'Agent';
+};
+
+function Feed({ messages, chats }: { messages: Message[]; chats: Chat[] }) {
   const rows = messages.filter((m) => m.body.trim() !== '/stop').slice(-9);
   if (!rows.length) return <div className="feed-empty"><Spinner size={14} tone="blue" /> Listening for transmissions…</div>;
   return (
@@ -482,7 +493,8 @@ function Feed({ messages }: { messages: Message[] }) {
       {rows.map((m) => (
         <div key={m.id} className={`feed-row f-${m.sender}`}>
           <span className="t">{stamp(new Date(m.created_at))}</span>
-          <span className="dir">{m.sender === 'user' ? '▲ IN ' : m.sender === 'claude' ? '◆ OUT' : '■ SYS'}</span>
+          <span className="dir">{m.sender === 'user' ? '▲ IN ' : m.sender === 'agent' ? '◆ OUT' : '■ SYS'}</span>
+          <span className="ag">{agentName(chats.find((c) => c.id === m.chat_id)?.agent_id).slice(0, 6)}</span>
           <span className="id">#{hexId(m.id, 6)}</span>
           <span className="txt">{firstLine(m.body)}</span>
           {m.sender === 'user' && <span className={`st st-${m.status}`}>{m.status === 'processing' ? 'EXEC' : m.status.toUpperCase()}</span>}
@@ -592,7 +604,7 @@ function ConfigForm({
         </select>
       </label>
       <label className="setting">
-        <span>Model</span>
+        <span>Claude model</span>
         <select value={c.model} onChange={(e) => engine.updateConfig({ model: e.target.value })}>
           <option value="">Default</option>
           <option value="opus">Opus</option>
@@ -601,16 +613,23 @@ function ConfigForm({
         </select>
       </label>
       <div className="setting inline">
-        <span>Session</span>
-        <code>{c.sessionId ? c.sessionId.slice(0, 8) : 'new'}</code>
-        <button className="link" onClick={() => engine.updateConfig({ sessionId: '' })}>Reset</button>
-      </div>
-      <div className="setting inline">
         <span>Claude Code</span>
         <code className={c.claudePath || host.claudePath ? '' : 'warn'} title={c.claudePath || host.claudePath || ''}>
           {(c.claudePath || host.claudePath || 'Not found').split(/[\\/]/).pop()}
         </code>
       </div>
+      <label className="setting">
+        <span>Codex model</span>
+        <input placeholder="Default" defaultValue={c.codexModel} onBlur={(e) => engine.updateConfig({ codexModel: e.target.value.trim() })} />
+      </label>
+      <label className="setting">
+        <span>Codex CLI path</span>
+        <input
+          placeholder={snap.workers.codex?.binary || host.codexPath || 'Not found · npm i -g @openai/codex'}
+          defaultValue={c.codexPath}
+          onBlur={(e) => engine.updateConfig({ codexPath: e.target.value.trim() })}
+        />
+      </label>
       <label className="setting inline toggle">
         <span>Start with Windows</span>
         <input

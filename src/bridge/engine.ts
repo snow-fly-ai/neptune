@@ -2,21 +2,16 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { notify } from '../lib/notify';
 import { SUPABASE_URL } from '../lib/config';
 import type { Message } from '../lib/types';
-import {
-  cancelClaude,
-  describeTool,
-  runClaude,
-  saveConfig,
-  type BridgeConfig,
-  type HostInfo,
-  type RunResult,
-} from './claude';
+import { ADAPTERS, type AgentAdapter, type TaskOutcome } from './agents';
+import { cancelProcess, hostInfo, saveConfig, type BridgeConfig, type HostInfo } from './native';
+import { inTauri } from '../lib/platform';
 
 export interface LogEntry {
   id: number;
   at: number;
   kind: 'info' | 'task' | 'tool' | 'done' | 'error';
   text: string;
+  agent?: string;
 }
 
 export interface LoginCode {
@@ -25,28 +20,32 @@ export interface LoginCode {
   expires_at: string;
 }
 
+/** One agent's queue on this PC. */
+export interface WorkerState {
+  id: string;
+  name: string;
+  /** CLI path, or null when that agent isn't installed here. */
+  binary: string | null;
+  busy: boolean;
+  current: Message | null;
+  activity: string | null;
+}
+
 export interface EngineSnapshot {
   loginCode: LoginCode | null;
   running: boolean;
+  workers: Record<string, WorkerState>;
+  /** Any agent working; `current`/`activity` show the first busy one for the console. */
   busy: boolean;
   activity: string | null;
   current: Message | null;
+  currentAgent: string | null;
   log: LogEntry[];
   config: BridgeConfig;
 }
 
 const HEARTBEAT_MS = 20_000;
 const POLL_MS = 15_000;
-
-function systemPrompt(host: HostInfo, cwd: string) {
-  return [
-    `You are Claude, running headlessly on the user's Windows PC "${host.machine}" through Relay, a chat app.`,
-    `The user is messaging you from the Relay app on their Android phone. They cannot see your terminal or tool output, only your final reply, which arrives as a push notification and chat message.`,
-    `Work autonomously and finish the task end-to-end; don't stop to ask for confirmation on routine steps. If you truly need a decision, ask one clear question and stop.`,
-    `Finish with a concise, phone-friendly reply: lead with the outcome, then short bullets. Avoid long code blocks unless asked.`,
-    `Working directory: ${cwd}.`,
-  ].join('\n');
-}
 
 export class BridgeEngine {
   readonly client: SupabaseClient;
@@ -56,8 +55,8 @@ export class BridgeEngine {
   private listeners = new Set<() => void>();
   private timers: number[] = [];
   private logSeq = 0;
-  private lastActivityPush = 0;
-  private pendingActivity: number | undefined;
+  private lastActivityPush: Record<string, number> = {};
+  private pendingActivity: Record<string, number | undefined> = {};
   private snapshot: EngineSnapshot;
 
   constructor(config: BridgeConfig, host: HostInfo, version: string) {
@@ -67,7 +66,21 @@ export class BridgeEngine {
     this.client = createClient(SUPABASE_URL, config.serviceKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
-    this.snapshot = { loginCode: null, running: false, busy: false, activity: null, current: null, log: [], config };
+    const workers: Record<string, WorkerState> = {};
+    for (const a of ADAPTERS) {
+      workers[a.id] = { id: a.id, name: a.name, binary: a.binary(config, host), busy: false, current: null, activity: null };
+    }
+    this.snapshot = {
+      loginCode: null,
+      running: false,
+      workers,
+      busy: false,
+      activity: null,
+      current: null,
+      currentAgent: null,
+      log: [],
+      config,
+    };
   }
 
   // ---- store plumbing for React -------------------------------------------------
@@ -80,8 +93,19 @@ export class BridgeEngine {
     this.snapshot = { ...this.snapshot, ...patch };
     this.listeners.forEach((l) => l());
   }
-  private log(kind: LogEntry['kind'], text: string) {
-    const entry = { id: ++this.logSeq, at: Date.now(), kind, text };
+  private setWorker(id: string, patch: Partial<WorkerState>) {
+    const workers = { ...this.snapshot.workers, [id]: { ...this.snapshot.workers[id], ...patch } };
+    const lead = Object.values(workers).find((w) => w.busy && w.current);
+    this.set({
+      workers,
+      busy: Object.values(workers).some((w) => w.busy),
+      current: lead?.current ?? null,
+      activity: lead?.activity ?? null,
+      currentAgent: lead?.id ?? null,
+    });
+  }
+  private log(kind: LogEntry['kind'], text: string, agent?: string) {
+    const entry = { id: ++this.logSeq, at: Date.now(), kind, text: agent ? `[${agent.toUpperCase()}] ${text}` : text, agent };
     this.set({ log: [...this.snapshot.log.slice(-299), entry] });
   }
 
@@ -89,21 +113,46 @@ export class BridgeEngine {
     this.config = { ...this.config, ...patch };
     await saveConfig(this.config);
     this.set({ config: this.config });
+    this.refreshBinaries();
+  }
+
+  private refreshBinaries() {
+    for (const a of ADAPTERS) {
+      const binary = a.binary(this.config, this.host);
+      if (binary !== this.snapshot.workers[a.id].binary) this.setWorker(a.id, { binary });
+    }
+  }
+
+  /** Picks up CLIs installed while the bridge was running. */
+  private async rescanHost() {
+    if (!inTauri()) return;
+    try {
+      this.host = await hostInfo();
+      this.refreshBinaries();
+    } catch {
+      /* keep the last scan */
+    }
+  }
+
+  private adapters(installedOnly = true) {
+    return ADAPTERS.filter((a) => !installedOnly || !!this.snapshot.workers[a.id].binary);
   }
 
   // ---- lifecycle -------------------------------------------------------------------
   async start() {
     if (this.snapshot.running) return;
     this.set({ running: true });
-    this.log('info', `Bridge started on ${this.host.machine}`);
-    await this.recoverInterrupted();
+    const found = this.adapters().map((a) => a.name);
+    this.log('info', `Bridge started on ${this.host.machine} · agents: ${found.length ? found.join(', ') : 'none found'}`);
+    await this.migrateLegacySession();
+    for (const a of this.adapters()) await this.recoverInterrupted(a);
 
     this.client
       .channel('bridge-inbox')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: 'sender=eq.user' }, (p) => {
         const m = p.new as Message;
-        if (m.body.trim() === '/stop') this.stopCurrent(m);
-        else this.kick();
+        if (m.body.trim() === '/stop') this.stopChat(m);
+        else this.kickAll();
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'login_codes' }, (p) => {
         this.showLoginCode(p.new as LoginCode);
@@ -115,9 +164,9 @@ export class BridgeEngine {
 
     this.heartbeat();
     this.timers.push(window.setInterval(() => this.heartbeat(), HEARTBEAT_MS));
-    this.timers.push(window.setInterval(() => this.kick(), POLL_MS));
+    this.timers.push(window.setInterval(() => this.kickAll(), POLL_MS));
     window.addEventListener('beforeunload', this.goOffline);
-    this.kick();
+    this.kickAll();
   }
 
   async stop() {
@@ -127,6 +176,22 @@ export class BridgeEngine {
     await this.goOffline();
     this.set({ running: false });
     this.log('info', 'Bridge paused');
+  }
+
+  /** Before chats existed there was one Claude session in bridge.json; hand it to the first Claude chat. */
+  private async migrateLegacySession() {
+    const sid = this.config.sessionId;
+    if (!sid) return;
+    const { data } = await this.client
+      .from('chats')
+      .select('id')
+      .eq('agent_id', 'claude')
+      .is('session_id', null)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (data) await this.client.from('chats').update({ session_id: sid }).eq('id', data.id);
+    await this.updateConfig({ sessionId: '' });
   }
 
   /** Phone sign-in codes are shown here (and as a Windows notification) rather than emailed. */
@@ -142,93 +207,97 @@ export class BridgeEngine {
   }
 
   private goOffline = async () => {
-    await this.client.from('agent_state').update({ online: false, activity: null }).eq('id', 1);
+    const ids = ADAPTERS.map((a) => a.id);
+    await this.client.from('agents').update({ online: false, activity: null, current_chat_id: null }).in('id', ids);
   };
 
   private async heartbeat() {
-    const { error } = await this.client
-      .from('agent_state')
-      .update({
+    await this.rescanHost();
+    const rows = this.adapters().map((a) => {
+      const w = this.snapshot.workers[a.id];
+      return {
+        id: a.id,
+        name: a.name,
         online: true,
         last_seen: new Date().toISOString(),
         machine: this.host.machine,
         version: this.version,
-        session_id: this.config.sessionId || null,
-        activity: this.snapshot.activity,
-      })
-      .eq('id', 1);
+        activity: w.busy ? w.activity : null,
+        current_chat_id: w.current?.chat_id ?? null,
+      };
+    });
+    if (!rows.length) return;
+    const { error } = await this.client.from('agents').upsert(rows);
     if (error) this.log('error', `Heartbeat failed: ${error.message}`);
   }
 
-  private setActivity(text: string | null, force = false) {
-    this.set({ activity: text });
+  private setActivity(agent: string, text: string | null, force = false) {
+    this.setWorker(agent, { activity: text });
     const push = () => {
-      this.lastActivityPush = Date.now();
-      this.pendingActivity = undefined;
-      this.client.from('agent_state').update({ activity: this.snapshot.activity, last_seen: new Date().toISOString() }).eq('id', 1).then();
+      const w = this.snapshot.workers[agent];
+      this.lastActivityPush[agent] = Date.now();
+      this.pendingActivity[agent] = undefined;
+      this.client
+        .from('agents')
+        .update({ activity: w.activity, current_chat_id: w.busy ? (w.current?.chat_id ?? null) : null, last_seen: new Date().toISOString() })
+        .eq('id', agent)
+        .then();
     };
-    const wait = 1200 - (Date.now() - this.lastActivityPush);
+    const wait = 1200 - (Date.now() - (this.lastActivityPush[agent] ?? 0));
     if (force || wait <= 0) {
-      window.clearTimeout(this.pendingActivity);
+      window.clearTimeout(this.pendingActivity[agent]);
       push();
-    } else if (this.pendingActivity === undefined) {
-      this.pendingActivity = window.setTimeout(push, wait);
+    } else if (this.pendingActivity[agent] === undefined) {
+      this.pendingActivity[agent] = window.setTimeout(push, wait);
     }
   }
 
   /** A task left "processing" means the bridge died mid-run; don't silently re-run it. */
-  private async recoverInterrupted() {
-    const { data } = await this.client.from('messages').select('id').eq('sender', 'user').eq('status', 'processing');
-    for (const m of data ?? []) {
+  private async recoverInterrupted(a: AgentAdapter) {
+    const { data } = await this.client
+      .from('messages')
+      .select('id, chat_id, chats!inner(agent_id)')
+      .eq('sender', 'user')
+      .eq('status', 'processing')
+      .eq('chats.agent_id', a.id);
+    for (const m of (data ?? []) as { id: string; chat_id: string }[]) {
       await this.client.from('messages').update({ status: 'error' }).eq('id', m.id);
-      await this.reply(m.id, 'That task was interrupted because the Relay bridge restarted. Send it again if you still need it.', 'system');
+      await this.reply(m.chat_id, m.id, 'That task was interrupted because the Relay bridge restarted. Send it again if you still need it.', 'system');
     }
   }
 
   // ---- queue -------------------------------------------------------------------------
-  private async claimNext(): Promise<Message | null> {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const { data: next } = await this.client
-        .from('messages')
-        .select('*')
-        .eq('sender', 'user')
-        .eq('status', 'queued')
-        .order('created_at', { ascending: true })
-        .limit(1)
-        .maybeSingle();
-      if (!next) return null;
-      const { data: claimed } = await this.client
-        .from('messages')
-        .update({ status: 'processing' })
-        .eq('id', next.id)
-        .eq('status', 'queued')
-        .select()
-        .maybeSingle();
-      if (claimed) return claimed as Message;
-    }
-    return null;
+  private async claimNext(agent: string): Promise<Message | null> {
+    const { data, error } = await this.client.rpc('claim_next_message', { p_agent: agent }).maybeSingle();
+    if (error) throw new Error(error.message);
+    return (data as Message | null) ?? null;
   }
 
-  kick = async () => {
-    if (!this.snapshot.running || this.snapshot.busy) return;
-    this.set({ busy: true });
-    try {
-      let m: Message | null;
-      while (this.snapshot.running && (m = await this.claimNext())) {
-        this.set({ current: m });
-        await this.handle(m);
-        this.set({ current: null });
-      }
-    } catch (e) {
-      this.log('error', `Queue error: ${String(e)}`);
-    } finally {
-      this.set({ busy: false, current: null });
-      this.setActivity(null, true);
-    }
+  kickAll = () => {
+    for (const a of this.adapters()) this.kick(a);
   };
 
-  private async reply(replyTo: string | null, body: string, sender: 'claude' | 'system' = 'claude', meta: object = {}) {
-    const { error } = await this.client.from('messages').insert({ sender, body, status: 'sent', reply_to: replyTo, meta });
+  /** Works one agent's queue, one task at a time. Different agents run side by side. */
+  private async kick(a: AgentAdapter) {
+    if (!this.snapshot.running || this.snapshot.workers[a.id].busy) return;
+    this.setWorker(a.id, { busy: true });
+    try {
+      let m: Message | null;
+      while (this.snapshot.running && (m = await this.claimNext(a.id))) {
+        this.setWorker(a.id, { current: m });
+        await this.handle(a, m);
+        this.setWorker(a.id, { current: null });
+      }
+    } catch (e) {
+      this.log('error', `Queue error: ${String(e)}`, a.id);
+    } finally {
+      this.setWorker(a.id, { busy: false, current: null });
+      this.setActivity(a.id, null, true);
+    }
+  }
+
+  private async reply(chatId: string, replyTo: string | null, body: string, sender: 'agent' | 'system' = 'agent', meta: object = {}) {
+    const { error } = await this.client.from('messages').insert({ chat_id: chatId, sender, body, status: 'sent', reply_to: replyTo, meta });
     if (error) this.log('error', `Could not post reply: ${error.message}`);
   }
 
@@ -236,130 +305,129 @@ export class BridgeEngine {
     await this.client.from('messages').update({ status }).eq('id', m.id);
   }
 
-  private async handle(m: Message) {
+  private async chatSession(chatId: string): Promise<string | null> {
+    const { data } = await this.client.from('chats').select('session_id').eq('id', chatId).maybeSingle();
+    return (data?.session_id as string | null) ?? null;
+  }
+
+  private async setChatSession(chatId: string, sessionId: string | null) {
+    await this.client.from('chats').update({ session_id: sessionId }).eq('id', chatId);
+  }
+
+  private async handle(a: AgentAdapter, m: Message) {
     const body = m.body.trim();
-    this.log('task', body.length > 140 ? `${body.slice(0, 139)}…` : body);
+    this.log('task', body.length > 140 ? `${body.slice(0, 139)}…` : body, a.id);
 
     if (body === '/new') {
-      await this.updateConfig({ sessionId: '' });
-      await this.reply(m.id, 'Started a fresh session. I won’t remember the previous conversation.', 'system');
+      await this.setChatSession(m.chat_id, null);
+      await this.reply(m.chat_id, m.id, `Started a fresh ${a.name} session in this chat. I won’t remember the earlier messages.`, 'system');
       return this.finish(m, 'done');
     }
     if (body === '/stop') {
       return this.finish(m, 'done');
     }
     if (body === '/status') {
+      const session = await this.chatSession(m.chat_id);
+      const model = a.model(this.config);
       await this.reply(
+        m.chat_id,
         m.id,
-        `**Bridge:** ${this.host.machine} · v${this.version}\n\n**Workspace:** \`${this.workspace()}\`\n\n**Permissions:** ${this.config.permissionMode || 'bypassPermissions'}\n\n**Session:** ${this.config.sessionId ? `\`${this.config.sessionId.slice(0, 8)}\`` : 'new'}`,
+        `**Agent:** ${a.name}${model ? ` · ${model}` : ''}\n\n**Bridge:** ${this.host.machine} · v${this.version}\n\n**Workspace:** \`${this.workspace()}\`\n\n**Permissions:** ${this.config.permissionMode || 'bypassPermissions'}\n\n**Session:** ${session ? `\`${session.slice(0, 8)}\`` : 'new'}`,
       );
       return this.finish(m, 'done');
     }
-    await this.runTask(m);
+    await this.runTask(a, m);
   }
 
   private workspace() {
     return this.config.workspace || this.host.home;
   }
 
-  /** Cancels the running task. `stopMsg` is the phone's /stop message, if any. */
-  stopCurrent(stopMsg?: Message) {
-    const cur = this.snapshot.current;
-    if (cur) {
-      this.log('info', stopMsg ? 'Stop requested from phone' : 'Stop requested');
-      cancelClaude(cur.id);
+  /** Cancels the running task in the chat a phone /stop was sent from. */
+  private stopChat(stopMsg: Message) {
+    for (const w of Object.values(this.snapshot.workers)) {
+      if (w.current && w.current.chat_id === stopMsg.chat_id) {
+        this.log('info', 'Stop requested from phone', w.id);
+        cancelProcess(w.current.id);
+      }
     }
     // Mark the /stop itself handled so it never runs as a task.
-    if (stopMsg) this.client.from('messages').update({ status: 'done' }).eq('id', stopMsg.id).eq('status', 'queued').then();
+    this.client.from('messages').update({ status: 'done' }).eq('id', stopMsg.id).eq('status', 'queued').then();
   }
 
-  private async runTask(m: Message, retried = false): Promise<void> {
-    const claudePath = this.config.claudePath || this.host.claudePath;
-    if (!claudePath) {
-      await this.reply(m.id, 'I can’t find Claude Code on the PC. Open the Relay bridge and set the Claude path.', 'system');
+  /** Desktop abort: stops one agent's task, or every running task. */
+  stopCurrent(agent?: string) {
+    for (const w of Object.values(this.snapshot.workers)) {
+      if (w.current && (!agent || w.id === agent)) {
+        this.log('info', 'Stop requested', w.id);
+        cancelProcess(w.current.id);
+      }
+    }
+  }
+
+  private async runTask(a: AgentAdapter, m: Message, retried = false): Promise<void> {
+    const binary = a.binary(this.config, this.host);
+    if (!binary) {
+      await this.reply(m.chat_id, m.id, `I can’t find the ${a.name} CLI on the PC. Install it, or set its path in the Relay bridge config.`, 'system');
       return this.finish(m, 'error');
     }
     const cwd = this.workspace();
-    this.setActivity('Thinking…', true);
+    const sessionId = retried ? null : await this.chatSession(m.chat_id);
+    this.setActivity(a.id, 'Thinking…', true);
     let steps = 0;
-    let res: RunResult;
+    let out: TaskOutcome;
     try {
-      res = await runClaude(
+      out = await a.run(
+        { runId: m.id, prompt: m.body, cwd, sessionId, config: this.config, host: this.host },
         {
-          runId: m.id,
-          prompt: m.body,
-          cwd,
-          claudePath,
-          permissionMode: this.config.permissionMode || 'bypassPermissions',
-          sessionId: this.config.sessionId || undefined,
-          model: this.config.model || undefined,
-          appendSystemPrompt: systemPrompt(this.host, cwd),
-        },
-        (e) => {
-          if (e.type === 'system' && e.subtype === 'init' && e.session_id) {
-            if (e.session_id !== this.config.sessionId) this.updateConfig({ sessionId: e.session_id });
-          }
-          if (e.type === 'assistant' && Array.isArray(e.message?.content)) {
-            for (const c of e.message.content) {
-              if (c.type === 'tool_use') {
-                steps++;
-                const text = describeTool(c.name, c.input);
-                this.log('tool', text);
-                this.setActivity(text);
-              } else if (c.type === 'text' && c.text?.trim()) {
-                this.setActivity('Writing a reply…');
-              } else if (c.type === 'thinking') {
-                this.setActivity('Thinking…');
-              }
+          activity: (text, step) => {
+            if (step) {
+              steps++;
+              this.log('tool', text, a.id);
             }
-          }
+            this.setActivity(a.id, text);
+          },
+          session: (id) => {
+            if (id !== sessionId) this.setChatSession(m.chat_id, id);
+          },
         },
       );
     } catch (e) {
-      this.log('error', String(e));
-      await this.reply(m.id, `I couldn't start Claude Code: ${String(e)}`, 'system');
+      this.log('error', String(e), a.id);
+      await this.reply(m.chat_id, m.id, `I couldn't start ${a.name}: ${String(e)}`, 'system');
       return this.finish(m, 'error');
     }
 
-    if (res.cancelled) {
-      this.log('info', 'Task stopped');
-      await this.reply(m.id, 'Stopped. Anything already changed stays as it is.', 'system');
+    if (out.cancelled) {
+      this.log('info', 'Task stopped', a.id);
+      await this.reply(m.chat_id, m.id, 'Stopped. Anything already changed stays as it is.', 'system');
       return this.finish(m, 'cancelled');
     }
 
-    const r = res.result;
-    const staleSession = /No conversation found|session.*not found/i.test(`${res.stderr} ${r?.result ?? ''}`);
-    if (!retried && this.config.sessionId && staleSession) {
-      this.log('info', 'Previous session not found; starting a new one');
-      await this.updateConfig({ sessionId: '' });
-      return this.runTask(m, true);
+    if (!retried && sessionId && out.staleSession) {
+      this.log('info', 'Previous session not found; starting a new one', a.id);
+      await this.setChatSession(m.chat_id, null);
+      return this.runTask(a, m, true);
     }
 
-    if (!r) {
-      const tail = res.stderr.trim().split('\n').slice(-6).join('\n') || `exit code ${res.exitCode}`;
-      this.log('error', tail);
-      await this.reply(m.id, `Claude Code exited without a result:\n\n\`\`\`\n${tail}\n\`\`\``, 'system');
+    if (out.text == null) {
+      const tail = out.stderr.trim().split('\n').slice(-6).join('\n') || `exit code ${out.exitCode}`;
+      this.log('error', tail, a.id);
+      await this.reply(m.chat_id, m.id, `${a.name} exited without a result:\n\n\`\`\`\n${tail}\n\`\`\``, 'system');
       return this.finish(m, 'error');
     }
 
-    if (r.session_id) await this.updateConfig({ sessionId: r.session_id });
-    const text = (r.result || '').trim() || (r.is_error ? `Something went wrong (${r.subtype}).` : 'Done.');
-    const loginHint = /not logged in|\/login/i.test(text)
-      ? '\n\nThe Claude Code CLI on the PC isn’t signed in. Run `claude auth login` on the PC once.'
-      : '';
-    await this.reply(m.id, text + loginHint, 'claude', {
-      cost_usd: r.total_cost_usd,
-      duration_ms: r.duration_ms,
-      session_id: r.session_id,
-      turns: r.num_turns,
-      is_error: r.is_error,
-    });
-    this.log(r.is_error ? 'error' : 'done', `${r.is_error ? 'Failed' : 'Done'} · ${steps} steps · ${Math.round((r.duration_ms || 0) / 1000)}s`);
-    return this.finish(m, r.is_error ? 'error' : 'done');
+    if (out.sessionId) await this.setChatSession(m.chat_id, out.sessionId);
+    await this.reply(m.chat_id, m.id, out.text, 'agent', { ...out.meta, agent: a.id });
+    const secs = Math.round((out.meta.duration_ms || 0) / 1000);
+    this.log(out.isError ? 'error' : 'done', `${out.isError ? 'Failed' : 'Done'} · ${steps} steps · ${secs}s`, a.id);
+    return this.finish(m, out.isError ? 'error' : 'done');
   }
 
-  /** Lets the desktop post a message to the phone as Claude. */
-  async sendAsClaude(body: string) {
-    await this.reply(null, body, 'claude');
+  /** Lets the desktop post a note to the phone, into the most recently active chat. */
+  async sendNote(body: string) {
+    const { data } = await this.client.from('chats').select('id').order('updated_at', { ascending: false }).limit(1).maybeSingle();
+    if (!data) return this.log('error', 'No chat to post into yet');
+    await this.reply(data.id, null, body, 'agent', { agent: 'bridge' });
   }
 }

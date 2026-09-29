@@ -1,24 +1,30 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { AgentState, Message } from './types';
+import { ONLINE_WINDOW_MS } from './config';
+import type { Agent, Chat, Message } from './types';
 
 const PAGE = 200;
 
 const byTime = (a: Message, b: Message) => a.created_at.localeCompare(b.created_at);
+const byRecent = (a: Chat, b: Chat) => b.updated_at.localeCompare(a.updated_at);
+
+/** Heartbeat within the window and not explicitly signed off. */
+export const isOnline = (a: Agent | null | undefined, now: number) =>
+  !!a?.online && !!a.last_seen && now - Date.parse(a.last_seen) < ONLINE_WINDOW_MS;
 
 /**
- * Live view of the conversation and the agent's status. Realtime drives
- * updates; a periodic refetch covers dropped sockets and app resumes.
+ * Live view of one chat's messages (or every chat's, when `chatId` is null).
+ * Realtime drives updates; a periodic refetch covers dropped sockets and app resumes.
  */
-export function useConversation(client: SupabaseClient | null, onInsert?: (m: Message) => void) {
+export function useConversation(client: SupabaseClient | null, chatId: string | null, onInsert?: (m: Message) => void) {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [agent, setAgent] = useState<AgentState | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [live, setLive] = useState(false);
   const onInsertRef = useRef(onInsert);
   onInsertRef.current = onInsert;
 
   const upsert = useCallback((m: Message) => {
+    if (chatId && m.chat_id !== chatId) return;
     setMessages((prev) => {
       const i = prev.findIndex((x) => x.id === m.id);
       if (i === -1) return [...prev, m].sort(byTime);
@@ -26,36 +32,97 @@ export function useConversation(client: SupabaseClient | null, onInsert?: (m: Me
       next[i] = m;
       return next;
     });
-  }, []);
+  }, [chatId]);
 
   const refresh = useCallback(async () => {
     if (!client) return;
-    const [msgs, state] = await Promise.all([
-      client.from('messages').select('*').order('created_at', { ascending: false }).limit(PAGE),
-      client.from('agent_state').select('*').eq('id', 1).maybeSingle(),
+    let q = client.from('messages').select('*').order('created_at', { ascending: false }).limit(PAGE);
+    if (chatId) q = q.eq('chat_id', chatId);
+    const { data, error } = await q;
+    if (data) setMessages((data as Message[]).reverse());
+    if (!error) setLoaded(true);
+  }, [client, chatId]);
+
+  useEffect(() => {
+    if (!client) return;
+    setMessages([]);
+    setLoaded(false);
+    refresh();
+    const channel = client
+      .channel(`relay-feed-${chatId ?? 'all'}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'messages', ...(chatId ? { filter: `chat_id=eq.${chatId}` } : {}) },
+        (p) => {
+          if (p.eventType === 'DELETE') {
+            const id = (p.old as Partial<Message>).id;
+            setMessages((prev) => prev.filter((m) => m.id !== id));
+            return;
+          }
+          const m = p.new as Message;
+          upsert(m);
+          if (p.eventType === 'INSERT') onInsertRef.current?.(m);
+        },
+      )
+      .subscribe((status) => {
+        setLive(status === 'SUBSCRIBED');
+        if (status === 'SUBSCRIBED') refresh();
+      });
+
+    const onVisible = () => document.visibilityState === 'visible' && refresh();
+    document.addEventListener('visibilitychange', onVisible);
+    const poll = window.setInterval(refresh, 30_000);
+    return () => {
+      client.removeChannel(channel);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.clearInterval(poll);
+    };
+  }, [client, chatId, refresh, upsert]);
+
+  return { messages, loaded, live, upsert, refresh };
+}
+
+/** Live chat list and agent presence, plus every new message (for notifications). */
+export function useChats(client: SupabaseClient | null, onMessage?: (m: Message) => void) {
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [live, setLive] = useState(false);
+  const onMessageRef = useRef(onMessage);
+  onMessageRef.current = onMessage;
+
+  const putChat = useCallback((c: Chat) => {
+    setChats((prev) => [...prev.filter((x) => x.id !== c.id), c].sort(byRecent));
+  }, []);
+  const dropChat = useCallback((id: string) => setChats((prev) => prev.filter((x) => x.id !== id)), []);
+
+  const refresh = useCallback(async () => {
+    if (!client) return;
+    const [c, a] = await Promise.all([
+      client.from('chats').select('*').order('updated_at', { ascending: false }).limit(PAGE),
+      client.from('agents').select('*').order('id'),
     ]);
-    if (msgs.data) setMessages((msgs.data as Message[]).reverse());
-    if (state.data) setAgent(state.data as AgentState);
-    if (!msgs.error) setLoaded(true);
+    if (c.data) setChats(c.data as Chat[]);
+    if (a.data) setAgents(a.data as Agent[]);
+    if (!c.error) setLoaded(true);
   }, [client]);
 
   useEffect(() => {
     if (!client) return;
     refresh();
     const channel = client
-      .channel('relay-feed')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'messages' }, (p) => {
-        if (p.eventType === 'DELETE') {
-          const id = (p.old as Partial<Message>).id;
-          setMessages((prev) => prev.filter((m) => m.id !== id));
-          return;
-        }
-        const m = p.new as Message;
-        upsert(m);
-        if (p.eventType === 'INSERT') onInsertRef.current?.(m);
+      .channel('relay-chats')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'chats' }, (p) => {
+        if (p.eventType === 'DELETE') dropChat((p.old as Partial<Chat>).id!);
+        else putChat(p.new as Chat);
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'agent_state' }, (p) => {
-        if (p.new && 'id' in p.new) setAgent(p.new as AgentState);
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'agents' }, (p) => {
+        if (p.eventType === 'DELETE') return;
+        const a = p.new as Agent;
+        setAgents((prev) => [...prev.filter((x) => x.id !== a.id), a].sort((x, y) => x.id.localeCompare(y.id)));
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (p) => {
+        onMessageRef.current?.(p.new as Message);
       })
       .subscribe((status) => {
         setLive(status === 'SUBSCRIBED');
@@ -70,9 +137,9 @@ export function useConversation(client: SupabaseClient | null, onInsert?: (m: Me
       document.removeEventListener('visibilitychange', onVisible);
       window.clearInterval(poll);
     };
-  }, [client, refresh, upsert]);
+  }, [client, refresh, putChat, dropChat]);
 
-  return { messages, agent, loaded, live, upsert, refresh };
+  return { chats, agents, loaded, live, refresh, putChat, dropChat };
 }
 
 /** Re-renders on an interval so relative times and presence stay fresh. */

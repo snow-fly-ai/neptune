@@ -1,4 +1,3 @@
-import type { AgentState } from '../lib/types';
 import { useNow } from '../lib/useConversation';
 import { StopIcon } from './icons';
 
@@ -7,14 +6,14 @@ const elapsed = (ms: number) => {
   return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 };
 
-/** Live "what Claude is doing right now" strip above the composer. */
+/** Live "what the agent is doing right now" strip above the composer. */
 export function ActivityBar({
-  agent,
+  activity,
   working,
   since,
   onStop,
 }: {
-  agent: AgentState | null;
+  activity: string | null | undefined;
   working: boolean;
   /** ISO time the current task started, for the elapsed counter. */
   since?: string;
@@ -25,7 +24,7 @@ export function ActivityBar({
   return (
     <div className="activity">
       <span className="spinner" />
-      <span className="activity-text caret">{agent?.activity || 'Working…'}</span>
+      <span className="activity-text caret">{activity || 'Working…'}</span>
       {since && <span className="activity-time">{elapsed(now - Date.parse(since))}</span>}
       {onStop && (
         <button className="activity-stop" onClick={onStop}>

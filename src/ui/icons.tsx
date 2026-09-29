@@ -30,6 +30,12 @@ export const MailIcon = (p: P) => (
 export const RefreshIcon = (p: P) => (
   <svg {...base} {...p}><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" /></svg>
 );
+export const BackIcon = (p: P) => (
+  <svg {...base} {...p}><path d="M15 5l-7 7 7 7" /></svg>
+);
+export const PlusIcon = (p: P) => (
+  <svg {...base} {...p}><path d="M12 5v14M5 12h14" /></svg>
+);
 export const XIcon = (p: P) => (
   <svg {...base} {...p}><path d="M6 6l12 12M18 6L6 18" /></svg>
 );

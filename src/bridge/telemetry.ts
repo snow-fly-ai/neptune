@@ -78,7 +78,7 @@ export function useLatency(client: SupabaseClient) {
     let alive = true;
     const ping = async () => {
       const start = performance.now();
-      const { error } = await client.from('agent_state').select('id').eq('id', 1).maybeSingle();
+      const { error } = await client.from('agents').select('id').limit(1);
       if (alive && !error) setHist((h) => push(h, Math.round(performance.now() - start)).slice(-40));
     };
     ping();

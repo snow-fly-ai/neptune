@@ -1,16 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Session } from '@supabase/supabase-js';
 import { phoneClient } from './client';
-import { ensureNotifyPermission, notify } from '../lib/notify';
-import { useConversation, useNow } from '../lib/useConversation';
-import { checkPhoneUpdate, type PhoneUpdate } from '../lib/updates';
-import { openExternal } from '../lib/open';
-import { ONLINE_WINDOW_MS } from '../lib/config';
-import type { Message } from '../lib/types';
+import { isOnline, useConversation, useNow } from '../lib/useConversation';
+import type { Agent, Chat, Message } from '../lib/types';
 import { MessageList } from '../ui/MessageList';
 import { Composer } from '../ui/Composer';
 import { ActivityBar } from '../ui/ActivityBar';
-import { MoreIcon } from '../ui/icons';
+import { BackIcon, MoreIcon } from '../ui/icons';
 import { Reticle } from '../ui/Reticle';
 import { ago } from '../ui/time';
 
@@ -33,7 +28,7 @@ function useLatency() {
     let alive = true;
     const ping = async () => {
       const t = performance.now();
-      const { error } = await phoneClient.from('agent_state').select('id').eq('id', 1).maybeSingle();
+      const { error } = await phoneClient.from('agents').select('id').limit(1);
       if (alive) setMs(error ? null : Math.round(performance.now() - t));
     };
     ping();
@@ -48,45 +43,42 @@ function useLatency() {
 
 const isHiddenCommand = (m: Message) => m.sender === 'user' && m.body.trim() === '/stop';
 
-export function ChatScreen({ session }: { session: Session }) {
+export function ChatScreen({
+  chat,
+  agent,
+  onBack,
+  onDeleted,
+  onError,
+}: {
+  chat: Chat;
+  agent: Agent | undefined;
+  onBack: () => void;
+  onDeleted: () => void;
+  onError: (text: string) => void;
+}) {
   const now = useNow(1000);
   const [menu, setMenu] = useState(false);
-  const [update, setUpdate] = useState<PhoneUpdate | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const startedAt = useRef(Date.now());
   const latency = useLatency();
+  const { messages, live, upsert } = useConversation(phoneClient, chat.id);
 
-  const { messages, agent, live, upsert } = useConversation(phoneClient, (m) => {
-    if (m.sender === 'user') return;
-    if (Date.parse(m.created_at) < startedAt.current) return;
-    if (document.visibilityState !== 'visible') notify(m.sender === 'claude' ? 'Claude' : 'Relay', m.body);
-  });
-
-  useEffect(() => {
-    ensureNotifyPermission();
-    checkPhoneUpdate().then(setUpdate).catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    if (!toast) return;
-    const t = window.setTimeout(() => setToast(null), 2600);
-    return () => window.clearTimeout(t);
-  }, [toast]);
-
+  const name = agent?.name ?? chat.agent_id;
   const visible = useMemo(() => messages.filter((m) => !isHiddenCommand(m)), [messages]);
-  const online = !!agent?.last_seen && now - Date.parse(agent.last_seen) < ONLINE_WINDOW_MS && agent.online;
+  const online = isOnline(agent, now);
   const current = messages.find((m) => m.sender === 'user' && m.status === 'processing');
   const working = !!current;
   const queued = messages.filter((m) => m.sender === 'user' && m.status === 'queued').length;
+  const activity = agent?.current_chat_id === chat.id ? agent.activity : null;
 
   const send = async (body: string) => {
     const { data, error } = await phoneClient
       .from('messages')
-      .insert({ sender: 'user', body, status: 'queued' })
+      .insert({ chat_id: chat.id, sender: 'user', body, status: 'queued' })
       .select()
       .single();
     if (error) {
-      setToast(error.message);
+      onError(error.message);
       throw error;
     }
     upsert(data as Message);
@@ -94,7 +86,13 @@ export function ChatScreen({ session }: { session: Session }) {
 
   const cancel = async (m: Message) => {
     const { error } = await phoneClient.from('messages').update({ status: 'cancelled' }).eq('id', m.id).eq('status', 'queued');
-    if (error) setToast(error.message);
+    if (error) onError(error.message);
+  };
+
+  const remove = async () => {
+    const { error } = await phoneClient.from('chats').delete().eq('id', chat.id);
+    if (error) return onError(error.message);
+    onDeleted();
   };
 
   const statusLine = working
@@ -106,12 +104,16 @@ export function ChatScreen({ session }: { session: Session }) {
   return (
     <div className="phone">
       <header className="chat-head">
+        <button className="icon-btn back" onClick={onBack} aria-label="Back to chats">
+          <BackIcon />
+        </button>
         <div className="avatar">
           <Reticle size={46} detail="mini" state={working ? 'busy' : online ? 'idle' : 'offline'} />
         </div>
         <div className="who">
           <div className="name">
-            CLAUDE<small>// OPERATOR NODE</small>
+            {name.toUpperCase()}
+            <small>// {chat.title || 'NEW CHAT'}</small>
           </div>
           <div className={`sub ${working ? 'accent' : online ? 'on' : ''}`}>
             <span className={`led ${working ? 'busy' : online ? 'on' : ''}`} />
@@ -119,7 +121,7 @@ export function ChatScreen({ session }: { session: Session }) {
             {!live && <span className="reconnecting"> · reconnecting</span>}
           </div>
         </div>
-        <button className="icon-btn" onClick={() => setMenu((v) => !v)} aria-label="Menu">
+        <button className="icon-btn" onClick={() => { setMenu((v) => !v); setConfirmDelete(false); }} aria-label="Menu">
           <MoreIcon />
         </button>
         {menu && (
@@ -127,22 +129,23 @@ export function ChatScreen({ session }: { session: Session }) {
             <div className="scrim" onClick={() => setMenu(false)} />
             <div className="menu">
               <div className="menu-meta">
-                Signed in as
-                <b>{session.user.email}</b>
+                {name} chat
+                <b>{chat.title || 'New chat'}</b>
                 {agent?.machine && <span>Bridge: {agent.machine}{agent.version ? ` · v${agent.version}` : ''}</span>}
               </div>
-              <button onClick={() => { setMenu(false); send('/new').catch(() => {}); }}>Start a fresh session</button>
+              <button onClick={() => { setMenu(false); send('/status').catch(() => {}); }}>Agent status</button>
+              <button onClick={() => { setMenu(false); send('/new').catch(() => {}); }}>Fresh session in this chat</button>
               <button
-                onClick={async () => {
-                  setMenu(false);
-                  const u = await checkPhoneUpdate().catch(() => null);
-                  setUpdate(u);
-                  if (!u) setToast("You're on the latest version");
+                className="danger"
+                onClick={() => {
+                  if (confirmDelete) {
+                    setMenu(false);
+                    remove();
+                  } else setConfirmDelete(true);
                 }}
               >
-                Check for updates
+                {confirmDelete ? 'Tap again to delete' : 'Delete chat'}
               </button>
-              <button className="danger" onClick={() => phoneClient.auth.signOut()}>Sign out</button>
             </div>
           </>
         )}
@@ -167,22 +170,16 @@ export function ChatScreen({ session }: { session: Session }) {
         </div>
       </div>
 
-      {update && (
-        <button className="update-banner" onClick={() => openExternal(update.url)}>
-          <span>Relay {update.version} is available</span>
-          <b>Download</b>
-        </button>
-      )}
-
       <MessageList
         messages={visible}
         self="user"
+        agentName={() => name}
         onCancel={cancel}
         empty={
           <div className="empty">
             <Reticle size={190} detail="lite" state={online ? 'idle' : 'offline'} />
             <h2 className="caret">AWAITING DIRECTIVE</h2>
-            <p>Send a task. It runs on your PC and reports back here when complete.</p>
+            <p>Send a task. {name} runs it on your PC and reports back here when complete.</p>
             <div className="chips">
               {SUGGESTIONS.map((s) => (
                 <button key={s} onClick={() => send(s).catch(() => {})}>{s}</button>
@@ -192,9 +189,8 @@ export function ChatScreen({ session }: { session: Session }) {
         }
       />
 
-      <ActivityBar agent={agent} working={working} since={current?.updated_at} onStop={() => send('/stop').catch(() => {})} />
-      <Composer placeholder={online ? 'Enter directive…' : 'Enter directive (queued until node is back)'} onSend={send} enterSends={false} />
-      {toast && <div className="toast">{toast}</div>}
+      <ActivityBar activity={activity} working={working} since={current?.updated_at} onStop={() => send('/stop').catch(() => {})} />
+      <Composer placeholder={online ? 'Enter directive…' : 'Enter directive (queued until agent is back)'} onSend={send} enterSends={false} />
     </div>
   );
 }

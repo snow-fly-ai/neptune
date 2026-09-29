@@ -1,9 +1,15 @@
-//! Desktop bridge: persists the bridge config and runs the Claude Code CLI
-//! headlessly, streaming its `stream-json` output to the webview.
+//! Desktop bridge: persists the bridge config and runs agent CLIs (Claude Code,
+//! Codex, …) headlessly, streaming their JSON-lines output to the webview.
+//! The webview builds each CLI's arguments and interprets its events.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -21,8 +27,11 @@ pub struct BridgeConfig {
     pub workspace: String,
     pub permission_mode: String,
     pub claude_path: String,
+    /// Legacy single-chat session; moved onto the first Claude chat on upgrade.
     pub session_id: String,
     pub model: String,
+    pub codex_path: String,
+    pub codex_model: String,
 }
 
 /// `~/.relay/bridge.json`. Kept out of AppData so tools running inside
@@ -57,6 +66,7 @@ pub struct HostInfo {
     machine: String,
     home: String,
     claude_path: Option<String>,
+    codex_path: Option<String>,
 }
 
 /// Parses "2.1.281" into comparable parts; non-version dirs sort first.
@@ -115,6 +125,60 @@ fn find_claude() -> Option<PathBuf> {
     roots.into_iter().filter_map(newest_in).next()
 }
 
+/// Looks for `name` up to `depth` directories below `dir`.
+fn find_below(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
+    let p = dir.join(name);
+    if p.is_file() {
+        return Some(p);
+    }
+    if depth == 0 {
+        return None;
+    }
+    std::fs::read_dir(dir).ok()?.flatten().filter(|e| e.path().is_dir()).find_map(|e| find_below(&e.path(), name, depth - 1))
+}
+
+/// Finds the Codex CLI. Prefers the native binary inside the npm package over the
+/// `codex.cmd` shim, so cancelling a task kills Codex itself and not just cmd.exe.
+fn find_codex() -> Option<PathBuf> {
+    let exe = if cfg!(windows) { "codex.exe" } else { "codex" };
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let p = dir.join(exe);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    let mut npm_roots = Vec::new();
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        npm_roots.push(PathBuf::from(appdata).join("npm"));
+    }
+    if let Some(prefix) = std::env::var_os("NPM_CONFIG_PREFIX") {
+        npm_roots.push(PathBuf::from(prefix));
+    }
+    for root in &npm_roots {
+        if let Some(p) = find_below(&root.join("node_modules").join("@openai"), exe, 6) {
+            return Some(p);
+        }
+    }
+    if let Some(h) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from) {
+        for p in [h.join(".local").join("bin").join(exe), h.join(".cargo").join("bin").join(exe)] {
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    if cfg!(windows) {
+        for root in &npm_roots {
+            let p = root.join("codex.cmd");
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 #[tauri::command]
 pub fn host_info() -> HostInfo {
     let machine = std::env::var("COMPUTERNAME")
@@ -125,20 +189,20 @@ pub fn host_info() -> HostInfo {
         machine,
         home,
         claude_path: find_claude().map(|p| p.to_string_lossy().into_owned()),
+        codex_path: find_codex().map(|p| p.to_string_lossy().into_owned()),
     }
 }
+
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunArgs {
     run_id: String,
-    prompt: String,
+    program: String,
+    args: Vec<String>,
     cwd: String,
-    claude_path: String,
-    permission_mode: String,
-    session_id: Option<String>,
-    model: Option<String>,
-    append_system_prompt: Option<String>,
+    /// Written to stdin, then closed. Prompts go this way to avoid quoting issues.
+    stdin: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -152,30 +216,16 @@ struct RunEvent {
 #[serde(rename_all = "camelCase")]
 pub struct RunResult {
     exit_code: Option<i32>,
-    result: Option<Value>,
     stderr: String,
     cancelled: bool,
 }
 
-fn non_empty(s: &Option<String>) -> Option<&str> {
-    s.as_deref().filter(|s| !s.trim().is_empty())
-}
-
+/// Runs an agent CLI and emits each JSON line it prints as an `agent-event`.
 #[tauri::command]
-pub async fn run_claude(app: AppHandle, runs: State<'_, Runs>, args: RunArgs) -> Result<RunResult, String> {
-    let mut cmd = Command::new(&args.claude_path);
-    cmd.args(["-p", "--output-format", "stream-json", "--verbose", "--permission-mode"])
-        .arg(&args.permission_mode);
-    if let Some(s) = non_empty(&args.session_id) {
-        cmd.arg("--resume").arg(s);
-    }
-    if let Some(m) = non_empty(&args.model) {
-        cmd.arg("--model").arg(m);
-    }
-    if let Some(p) = non_empty(&args.append_system_prompt) {
-        cmd.arg("--append-system-prompt").arg(p);
-    }
-    cmd.current_dir(&args.cwd)
+pub async fn run_agent(app: AppHandle, runs: State<'_, Runs>, args: RunArgs) -> Result<RunResult, String> {
+    let mut cmd = Command::new(&args.program);
+    cmd.args(&args.args)
+        .current_dir(&args.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -183,11 +233,12 @@ pub async fn run_claude(app: AppHandle, runs: State<'_, Runs>, args: RunArgs) ->
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
 
-    let mut child = cmd.spawn().map_err(|e| format!("Could not start Claude Code ({}): {e}", args.claude_path))?;
+    let mut child = cmd.spawn().map_err(|e| format!("Could not start {}: {e}", args.program))?;
 
-    // The prompt goes over stdin to avoid command-line quoting issues.
     let mut stdin = child.stdin.take().ok_or("no stdin")?;
-    stdin.write_all(args.prompt.as_bytes()).await.map_err(|e| e.to_string())?;
+    if let Some(input) = &args.stdin {
+        stdin.write_all(input.as_bytes()).await.map_err(|e| e.to_string())?;
+    }
     drop(stdin);
 
     let stdout = child.stdout.take().ok_or("no stdout")?;
@@ -202,17 +253,13 @@ pub async fn run_claude(app: AppHandle, runs: State<'_, Runs>, args: RunArgs) ->
     runs.0.lock().await.insert(args.run_id.clone(), cancel.clone());
 
     let mut lines = BufReader::new(stdout).lines();
-    let mut result = None;
     let mut cancelled = false;
     loop {
         tokio::select! {
             line = lines.next_line() => match line {
                 Ok(Some(line)) => {
                     let Ok(event) = serde_json::from_str::<Value>(line.trim()) else { continue };
-                    if event.get("type").and_then(Value::as_str) == Some("result") {
-                        result = Some(event.clone());
-                    }
-                    let _ = app.emit("claude-event", RunEvent { run_id: args.run_id.clone(), event });
+                    let _ = app.emit("agent-event", RunEvent { run_id: args.run_id.clone(), event });
                 }
                 _ => break,
             },
@@ -227,11 +274,11 @@ pub async fn run_claude(app: AppHandle, runs: State<'_, Runs>, args: RunArgs) ->
     let status = child.wait().await.ok();
     runs.0.lock().await.remove(&args.run_id);
     let stderr = stderr_task.await.unwrap_or_default();
-    Ok(RunResult { exit_code: status.and_then(|s| s.code()), result, stderr, cancelled })
+    Ok(RunResult { exit_code: status.and_then(|s| s.code()), stderr, cancelled })
 }
 
 #[tauri::command]
-pub async fn cancel_claude(runs: State<'_, Runs>, run_id: String) -> Result<bool, String> {
+pub async fn cancel_agent(runs: State<'_, Runs>, run_id: String) -> Result<bool, String> {
     match runs.0.lock().await.get(&run_id) {
         Some(n) => {
             n.notify_one();

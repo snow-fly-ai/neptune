@@ -7,7 +7,9 @@ import { clock, dayLabel, duration } from './time';
 interface Props {
   messages: Message[];
   /** Whose messages sit on the right side. */
-  self: 'user' | 'claude';
+  self: 'user' | 'agent';
+  /** Label for an agent reply, e.g. "Claude" or "Codex". */
+  agentName?: (m: Message) => string;
   empty?: ReactNode;
   onCancel?: (m: Message) => void;
 }
@@ -38,7 +40,7 @@ function Status({ m, onCancel }: { m: Message; onCancel?: (m: Message) => void }
   }
 }
 
-export function MessageList({ messages, self, empty, onCancel }: Props) {
+export function MessageList({ messages, self, agentName = () => 'Agent', empty, onCancel }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const [showJump, setShowJump] = useState(false);
@@ -93,16 +95,16 @@ export function MessageList({ messages, self, empty, onCancel }: Props) {
                 <div className={`bubble ${m.sender} ${m.meta?.is_error ? 'is-error' : ''}`}>
                   {!grouped && (
                     <div className="bubble-head">
-                      {m.sender === 'claude' ? '◆ Claude · response' : '▲ Directive'}
+                      {m.sender === 'agent' ? `◆ ${agentName(m)} · response` : '▲ Directive'}
                       <i>#{m.id.slice(0, 6)}</i>
                     </div>
                   )}
-                  {m.sender === 'claude' ? <Markdown text={m.body} /> : <div className="plain">{m.body}</div>}
+                  {m.sender === 'agent' ? <Markdown text={m.body} /> : <div className="plain">{m.body}</div>}
                 </div>
                 <div className="meta">
                   <span>{clock(m.created_at)}</span>
                   {m.sender === 'user' && <Status m={m} onCancel={onCancel} />}
-                  {m.sender === 'claude' && m.meta?.duration_ms ? <span>· {duration(m.meta.duration_ms)}</span> : null}
+                  {m.sender === 'agent' && m.meta?.duration_ms ? <span>· {duration(m.meta.duration_ms)}</span> : null}
                 </div>
               </div>
             </Fragment>

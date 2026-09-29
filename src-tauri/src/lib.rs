@@ -83,8 +83,8 @@ pub fn run() {
             bridge::load_config,
             bridge::save_config,
             bridge::host_info,
-            bridge::run_claude,
-            bridge::cancel_claude,
+            bridge::run_agent,
+            bridge::cancel_agent,
             sys::sys_stats,
             sys::keep_awake,
         ])

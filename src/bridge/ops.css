@@ -224,7 +224,8 @@
 .feed-row .t { color: var(--faint); flex: none; }
 .feed-row .dir { flex: none; font-weight: 700; }
 .feed-row.f-user .dir { color: var(--blue-hi); }
-.feed-row.f-claude .dir { color: var(--green); }
+.feed-row.f-agent .dir { color: var(--green); }
+.feed-row .ag { color: var(--blue-hi); flex: none; width: 6ch; }
 .feed-row.f-system .dir { color: var(--warn); }
 .feed-row .id { color: var(--muted); flex: none; }
 .feed-row .txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-2); }
