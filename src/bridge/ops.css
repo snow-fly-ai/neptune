@@ -1,7 +1,11 @@
 /* Desktop ops console. Blue frames the structure; green is live machine output. */
 .ops {
   height: 100%;
+  width: 100%;
+  overflow: hidden;
   display: grid;
+  /* Explicit 0-min column: an implicit `auto` track grows to the header's min-content and pushes the console off-screen. */
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 46px minmax(0, 1fr) 26px;
   font-family: var(--mono);
   font-size: 12px;
@@ -52,7 +56,7 @@
 .chip.on i { background: var(--green); box-shadow: 0 0 6px var(--green); }
 .chip span { color: var(--blue-hi); }
 .chip b { color: var(--text); font-weight: 600; }
-.ops-actions { display: flex; gap: 6px; }
+.ops-actions { display: flex; gap: 6px; flex: none; }
 .ops-btn {
   height: 28px;
   padding: 0 12px;
@@ -64,7 +68,7 @@
   text-transform: uppercase;
 }
 .ops-btn:hover { background: rgba(37, 99, 235, 0.3); color: #fff; }
-.ops-clock { display: flex; align-items: center; gap: 14px; }
+.ops-clock { display: flex; align-items: center; gap: 14px; flex: none; }
 .ops-clock div { display: flex; flex-direction: column; line-height: 1.15; }
 .ops-clock span { font-size: 8.5px; letter-spacing: 0.18em; color: var(--blue-hi); }
 .ops-clock b { font-size: 14px; color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -314,6 +318,10 @@
 .toggle input:checked::after { transform: translateX(18px); background: var(--green); }
 .update-line { color: var(--muted); font: 11px var(--mono); }
 
+@media (max-width: 1320px) {
+  .ops-brand .dim, .stamp-tag { display: none; }
+  .ops-clock > div:nth-child(3) { display: none; }
+}
 @media (max-width: 1080px) {
   .ops-body { grid-template-columns: minmax(240px, 280px) minmax(0, 1fr); }
   .ops-body > .ops-col:last-child { display: none; }
