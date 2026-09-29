@@ -1,4 +1,4 @@
-# Nebula
+# Neptune
 
 Message the coding agents on your PC (Claude Code, Codex, …) from your phone. The agent works on the task and notifies you when it's done.
 
@@ -44,7 +44,7 @@ The PC's agent CLIs must be signed in once: `claude auth login` for Claude Code,
 
 | Doc | Contents |
 | --- | --- |
-| [docs/overview.md](docs/overview.md) | What Nebula is, how it works, features, security model, tech stack |
+| [docs/overview.md](docs/overview.md) | What Neptune is, how it works, features, security model, tech stack |
 | [docs/architecture.md](docs/architecture.md) | Code layout, bridge engine, Tauri commands, database and RLS, edge functions, protocols |
 | [docs/development.md](docs/development.md) | Required tools and versions, configuration, running locally, Supabase workflow, conventions |
 | [docs/releasing.md](docs/releasing.md) | CI releases, signing secrets, auto-updates, moving the repository |
